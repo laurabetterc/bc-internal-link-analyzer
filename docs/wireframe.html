@@ -1,0 +1,1197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Internal Link Analyzer — Wireframe</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <style>
+        /*
+         * Better Collective Brand Palette
+         * Primary:    #005947 (dark forest green)
+         * Primary light: #e8f5f1 (green tint for backgrounds)
+         * Accent:     #066aab (blue — CTAs, links)
+         * Error:      #d63637 (red)
+         * Warning:    #e6a817 (amber)
+         * Success:    #1a8754 (green)
+         * Dark:       #1a1a2e (text)
+         * Gray:       #6c757d (secondary text)
+         * Light gray: #f4f5f7 (page bg)
+         * White:      #ffffff (cards)
+         */
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Roboto', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #f4f5f7;
+            color: #1a1a2e;
+            line-height: 1.6;
+        }
+
+        /* --- Wireframe notice --- */
+        .wireframe-banner {
+            background: #e6a817;
+            color: #1a1a2e;
+            text-align: center;
+            padding: 10px;
+            font-size: 13px;
+            font-weight: 500;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            letter-spacing: 0.3px;
+        }
+
+        /* --- Top navbar --- */
+        .navbar {
+            background: #005947;
+            padding: 0 32px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            height: 56px;
+        }
+
+        .navbar-brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            color: #fff;
+            font-size: 16px;
+            font-weight: 700;
+            letter-spacing: -0.3px;
+        }
+
+        .navbar-brand .bc-logo {
+            width: 28px;
+            height: 28px;
+            background: rgba(255,255,255,0.2);
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 14px;
+        }
+
+        .navbar-user {
+            color: rgba(255,255,255,0.7);
+            font-size: 13px;
+            font-weight: 400;
+        }
+
+        /* --- Container --- */
+        .container {
+            max-width: 920px;
+            margin: 0 auto;
+            padding: 36px 24px 60px;
+        }
+
+        /* --- Buttons --- */
+        .btn {
+            padding: 10px 24px;
+            border: none;
+            border-radius: 3px;
+            font-family: 'Roboto', sans-serif;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            letter-spacing: 0.2px;
+        }
+
+        .btn-primary {
+            background: #005947;
+            color: #fff;
+        }
+
+        .btn-primary:hover {
+            background: #004738;
+        }
+
+        .btn-accent {
+            background: #066aab;
+            color: #fff;
+        }
+
+        .btn-accent:hover {
+            background: #055a92;
+        }
+
+        .btn-sm {
+            padding: 7px 14px;
+            font-size: 13px;
+        }
+
+        .btn-secondary {
+            background: #e9ecef;
+            color: #495057;
+        }
+
+        .btn-secondary:hover {
+            background: #dee2e6;
+        }
+
+        /* --- Dividers --- */
+        .section-divider {
+            border: none;
+            border-top: 1px solid #e2e5e9;
+            margin: 44px 0;
+        }
+
+        /* --- Section headers --- */
+        .section-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 6px;
+        }
+
+        .section-header h2 {
+            font-size: 20px;
+            font-weight: 700;
+            color: #1a1a2e;
+        }
+
+        .section-header .badge {
+            background: #e8f5f1;
+            color: #005947;
+            font-size: 11px;
+            font-weight: 500;
+            padding: 3px 10px;
+            border-radius: 3px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .section-subtitle {
+            color: #6c757d;
+            font-size: 14px;
+            margin-bottom: 24px;
+            font-weight: 400;
+        }
+
+        /* ===== LOGIN ===== */
+        .login-screen {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 50vh;
+            text-align: center;
+        }
+
+        .login-screen h1 {
+            font-size: 28px;
+            font-weight: 700;
+            color: #005947;
+            margin-bottom: 6px;
+        }
+
+        .login-screen p {
+            color: #6c757d;
+            margin-bottom: 32px;
+            font-size: 15px;
+            font-weight: 400;
+        }
+
+        .login-box {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .login-box input {
+            padding: 10px 16px;
+            border: 1px solid #ced4da;
+            border-radius: 3px;
+            font-family: 'Roboto', sans-serif;
+            font-size: 14px;
+            width: 260px;
+            background: #fff;
+        }
+
+        .login-box input:focus {
+            outline: none;
+            border-color: #005947;
+            box-shadow: 0 0 0 2px rgba(0,89,71,0.15);
+        }
+
+        /* ===== STEP INDICATOR ===== */
+        .step-indicator {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 36px;
+        }
+
+        .step {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            font-weight: 500;
+            color: #adb5bd;
+        }
+
+        .step.active { color: #005947; }
+        .step.done { color: #1a8754; }
+
+        .step-circle {
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        .step.active .step-circle { background: #005947; color: #fff; }
+        .step.done .step-circle { background: #1a8754; color: #fff; }
+        .step:not(.active):not(.done) .step-circle { background: #e9ecef; color: #adb5bd; }
+
+        .step-line {
+            width: 56px;
+            height: 2px;
+            background: #e9ecef;
+            margin: 0 8px;
+        }
+
+        .step-line.done { background: #1a8754; }
+
+        /* ===== UPLOAD ===== */
+        .upload-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+
+        .upload-card {
+            border: 2px dashed #ced4da;
+            border-radius: 6px;
+            padding: 32px 24px;
+            text-align: center;
+            background: #fff;
+            transition: border-color 0.2s;
+        }
+
+        .upload-card:hover { border-color: #005947; }
+
+        .upload-card .icon {
+            font-size: 28px;
+            margin-bottom: 10px;
+            opacity: 0.7;
+        }
+
+        .upload-card h3 {
+            font-size: 15px;
+            font-weight: 500;
+            margin-bottom: 4px;
+        }
+
+        .upload-card p {
+            font-size: 13px;
+            color: #6c757d;
+            font-weight: 400;
+        }
+
+        .upload-confirmation {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 16px;
+            background: #e8f5f1;
+            border-left: 3px solid #1a8754;
+            border-radius: 0 3px 3px 0;
+            font-size: 13px;
+            color: #005947;
+            margin-bottom: 6px;
+            font-weight: 400;
+        }
+
+        /* ===== WIZARD TABLES ===== */
+        .wizard-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            background: #fff;
+            border-radius: 4px;
+            overflow: hidden;
+            border: 1px solid #e2e5e9;
+            margin-bottom: 16px;
+        }
+
+        .wizard-table th {
+            background: #f8f9fa;
+            padding: 10px 16px;
+            text-align: left;
+            font-size: 11px;
+            font-weight: 500;
+            color: #6c757d;
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+        }
+
+        .wizard-table td {
+            padding: 10px 16px;
+            font-size: 14px;
+            border-top: 1px solid #f1f3f5;
+            font-weight: 400;
+        }
+
+        .wizard-table tr:hover td { background: #fafbfc; }
+
+        .keep { color: #1a8754; font-weight: 500; }
+        .remove { color: #d63637; font-weight: 500; }
+
+        .summary-box {
+            background: #f8f9fa;
+            border-radius: 3px;
+            padding: 12px 18px;
+            font-size: 13px;
+            color: #495057;
+            margin-bottom: 20px;
+            font-weight: 400;
+        }
+
+        .summary-box strong { color: #1a1a2e; }
+
+        .toggle-switch {
+            width: 40px;
+            height: 22px;
+            border-radius: 11px;
+            display: inline-block;
+            position: relative;
+            vertical-align: middle;
+        }
+
+        .toggle-on { background: #005947; }
+        .toggle-off { background: #ced4da; }
+
+        .toggle-switch::after {
+            content: '';
+            position: absolute;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: #fff;
+            top: 3px;
+            transition: left 0.2s;
+        }
+
+        .toggle-on::after { left: 21px; }
+        .toggle-off::after { left: 3px; }
+
+        .custom-pattern-row {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .custom-pattern-row input {
+            padding: 7px 14px;
+            border: 1px solid #ced4da;
+            border-radius: 3px;
+            font-family: 'Roboto', sans-serif;
+            font-size: 13px;
+            flex: 1;
+            max-width: 280px;
+        }
+
+        /* ===== STAT CARDS ===== */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 14px;
+            margin-bottom: 14px;
+        }
+
+        .stat-card {
+            background: #fff;
+            border-radius: 4px;
+            padding: 22px 16px;
+            text-align: center;
+            border: 1px solid #e2e5e9;
+        }
+
+        .stat-card .value {
+            font-size: 30px;
+            font-weight: 700;
+            color: #005947;
+            line-height: 1.1;
+        }
+
+        .stat-card .value.danger { color: #d63637; }
+
+        .stat-card .label {
+            font-size: 12px;
+            color: #6c757d;
+            margin-top: 4px;
+            font-weight: 400;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+        }
+
+        .stat-detail {
+            font-size: 13px;
+            color: #6c757d;
+            text-align: center;
+            font-weight: 400;
+        }
+
+        /* ===== CHART ===== */
+        .chart-placeholder {
+            background: #fff;
+            border: 1px solid #e2e5e9;
+            border-radius: 4px;
+            padding: 36px;
+            text-align: center;
+            margin-bottom: 24px;
+        }
+
+        .chart-bars {
+            display: flex;
+            align-items: flex-end;
+            justify-content: center;
+            gap: 5px;
+            height: 150px;
+            margin-bottom: 14px;
+        }
+
+        .chart-bar {
+            width: 36px;
+            background: #005947;
+            border-radius: 2px 2px 0 0;
+            opacity: 0.85;
+        }
+
+        .chart-label {
+            font-size: 11px;
+            color: #6c757d;
+            display: flex;
+            justify-content: space-between;
+            padding: 0 16px;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+        }
+
+        /* ===== DATA TABLES ===== */
+        .data-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            background: #fff;
+            border-radius: 4px;
+            overflow: hidden;
+            border: 1px solid #e2e5e9;
+            margin-bottom: 24px;
+        }
+
+        .data-table th {
+            background: #f8f9fa;
+            padding: 10px 14px;
+            text-align: left;
+            font-size: 11px;
+            font-weight: 500;
+            color: #6c757d;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid #e2e5e9;
+        }
+
+        .data-table td {
+            padding: 10px 14px;
+            font-size: 13px;
+            border-top: 1px solid #f1f3f5;
+            font-weight: 400;
+        }
+
+        .data-table tr:hover td { background: #fafbfc; }
+
+        .url-cell {
+            font-family: 'Roboto Mono', 'SF Mono', 'Monaco', monospace;
+            font-size: 12px;
+            color: #495057;
+        }
+
+        /* --- Health indicators --- */
+        .health-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 4px;
+        }
+
+        .health-critical { background: #d63637; }
+        .health-warning { background: #e6a817; }
+        .health-good { background: #1a8754; }
+
+        .legend {
+            display: flex;
+            gap: 20px;
+            font-size: 12px;
+            color: #6c757d;
+            margin-bottom: 16px;
+            font-weight: 400;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        /* --- Content type badges --- */
+        .content-type-badge {
+            font-size: 10px;
+            font-weight: 500;
+            padding: 2px 7px;
+            border-radius: 2px;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+        }
+
+        .ct-code { background: #fde8e8; color: #d63637; }
+        .ct-comparator { background: #fdf3db; color: #b8860b; }
+        .ct-guide { background: #e8f5f1; color: #005947; }
+        .ct-review { background: #e3eef7; color: #066aab; }
+
+        /* --- Status badges --- */
+        .status-badge {
+            font-size: 11px;
+            font-weight: 500;
+            padding: 3px 9px;
+            border-radius: 2px;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+        }
+
+        .status-add { background: #e8f5f1; color: #005947; }
+        .status-live { background: #f0f1f3; color: #6c757d; }
+        .status-remove { background: #fde8e8; color: #d63637; }
+
+        /* ===== RECOMMENDATION CARDS ===== */
+        .reco-card {
+            background: #fff;
+            border: 1px solid #e2e5e9;
+            border-radius: 4px;
+            padding: 18px 20px;
+            margin-bottom: 10px;
+        }
+
+        .reco-card .reco-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .reco-card .reco-link-flow {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 13px;
+            margin-bottom: 8px;
+        }
+
+        .reco-card .arrow {
+            color: #005947;
+            font-weight: 700;
+            font-size: 16px;
+        }
+
+        .reco-card .anchor-suggestion {
+            background: #f4f5f7;
+            padding: 5px 10px;
+            border-radius: 2px;
+            font-size: 12px;
+            font-family: 'Roboto Mono', 'SF Mono', monospace;
+            display: inline-block;
+            margin-bottom: 6px;
+            border: 1px solid #e9ecef;
+        }
+
+        .reco-card .reason {
+            font-size: 12px;
+            color: #6c757d;
+            line-height: 1.5;
+            font-weight: 400;
+        }
+
+        /* --- Filter chips --- */
+        .filter-chips {
+            display: flex;
+            gap: 6px;
+            margin-bottom: 16px;
+        }
+
+        .chip {
+            padding: 5px 14px;
+            border-radius: 3px;
+            font-size: 12px;
+            font-weight: 500;
+            border: 1px solid #ced4da;
+            background: #fff;
+            cursor: pointer;
+            font-family: 'Roboto', sans-serif;
+        }
+
+        .chip.active {
+            background: #005947;
+            color: #fff;
+            border-color: #005947;
+        }
+
+        /* --- Progress bar --- */
+        .progress-section {
+            text-align: center;
+            padding: 44px;
+        }
+
+        .progress-section h2 {
+            font-size: 18px;
+            font-weight: 500;
+            color: #005947;
+        }
+
+        .progress-bar-bg {
+            width: 100%;
+            max-width: 380px;
+            height: 4px;
+            background: #e2e5e9;
+            border-radius: 2px;
+            margin: 14px auto;
+            overflow: hidden;
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            background: #005947;
+            border-radius: 2px;
+            width: 65%;
+            animation: progress 2s ease-in-out infinite;
+        }
+
+        @keyframes progress {
+            0% { width: 30%; }
+            50% { width: 80%; }
+            100% { width: 30%; }
+        }
+
+        .progress-text {
+            font-size: 13px;
+            color: #6c757d;
+            margin-top: 6px;
+            font-weight: 400;
+        }
+
+        /* --- Download --- */
+        .download-section {
+            text-align: center;
+            padding: 36px;
+            background: #fff;
+            border-radius: 4px;
+            border: 1px solid #e2e5e9;
+        }
+
+        .download-section h3 {
+            font-size: 18px;
+            font-weight: 500;
+            margin-bottom: 6px;
+        }
+
+        .download-section p {
+            font-size: 13px;
+            color: #6c757d;
+            margin-bottom: 20px;
+            font-weight: 400;
+        }
+
+        .btn-download {
+            background: #005947;
+            color: #fff;
+            padding: 12px 28px;
+            font-size: 14px;
+            border-radius: 3px;
+        }
+
+        .btn-download:hover { background: #004738; }
+
+        /* --- Footer --- */
+        .footer {
+            text-align: center;
+            padding: 32px;
+            font-size: 12px;
+            color: #adb5bd;
+            font-weight: 400;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="wireframe-banner">
+        WIREFRAME — Non-functional mockup for layout review
+    </div>
+
+    <!-- ===== NAVBAR ===== -->
+    <div class="navbar">
+        <div class="navbar-brand">
+            <span class="bc-logo">BC</span>
+            Internal Link Analyzer
+        </div>
+        <div class="navbar-user">SEO Tools &middot; Better Collective</div>
+    </div>
+
+    <div class="container">
+
+        <!-- ===== LOGIN ===== -->
+        <div class="login-screen">
+            <h1>Internal Link Analyzer</h1>
+            <p>Upload your Screaming Frog export and get AI-powered linking recommendations</p>
+            <div class="login-box">
+                <input type="password" placeholder="Enter password">
+                <button class="btn btn-primary">Access</button>
+            </div>
+        </div>
+
+        <hr class="section-divider">
+
+        <!-- ===== STEP INDICATOR ===== -->
+        <div class="step-indicator">
+            <div class="step done"><span class="step-circle">&#10003;</span> Upload</div>
+            <div class="step-line done"></div>
+            <div class="step done"><span class="step-circle">&#10003;</span> Clean</div>
+            <div class="step-line done"></div>
+            <div class="step active"><span class="step-circle">3</span> Analyze</div>
+            <div class="step-line"></div>
+            <div class="step"><span class="step-circle">4</span> Results</div>
+        </div>
+
+        <!-- ===== FILE UPLOAD ===== -->
+        <div class="section-header">
+            <h2>Upload your files</h2>
+        </div>
+        <p class="section-subtitle">Drag & drop or click to browse. Both files are required.</p>
+
+        <div class="upload-grid">
+            <div class="upload-card">
+                <div class="icon">&#128206;</div>
+                <h3>Screaming Frog CSV</h3>
+                <p>"All Inlinks" export (.csv)</p>
+            </div>
+            <div class="upload-card">
+                <div class="icon">&#127919;</div>
+                <h3>Priority URLs CSV</h3>
+                <p>URL, Target Keyword, Content Type (.csv)</p>
+            </div>
+        </div>
+
+        <div class="upload-confirmation">&#10003; bolavip_all_inlinks.csv &mdash; 44,041 rows loaded</div>
+        <div class="upload-confirmation">&#10003; priority_urls.csv &mdash; 85 URLs loaded (72 with content type)</div>
+
+        <hr class="section-divider">
+
+        <!-- ===== CLEANING STEP 1 ===== -->
+        <div class="section-header">
+            <h2>Step 1 &mdash; Filter by Link Position</h2>
+            <span class="badge">Cleaning</span>
+        </div>
+        <p class="section-subtitle">We auto-detect link positions from your data. Only "Content" links are kept by default.</p>
+
+        <table class="wizard-table">
+            <thead>
+                <tr>
+                    <th>Link Position</th>
+                    <th style="text-align: right;">Links Found</th>
+                    <th style="text-align: center;">Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Content</strong></td>
+                    <td style="text-align: right;">24,567</td>
+                    <td style="text-align: center;" class="keep">&#10003; Keep</td>
+                </tr>
+                <tr>
+                    <td>Navigation</td>
+                    <td style="text-align: right;">11,234</td>
+                    <td style="text-align: center;" class="remove">&#10005; Remove</td>
+                </tr>
+                <tr>
+                    <td>Header</td>
+                    <td style="text-align: right;">4,567</td>
+                    <td style="text-align: center;" class="remove">&#10005; Remove</td>
+                </tr>
+                <tr>
+                    <td>Footer</td>
+                    <td style="text-align: right;">2,890</td>
+                    <td style="text-align: center;" class="remove">&#10005; Remove</td>
+                </tr>
+                <tr>
+                    <td>Aside</td>
+                    <td style="text-align: right;">783</td>
+                    <td style="text-align: center;" class="remove">&#10005; Remove</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="summary-box">
+            Keeping <strong>24,567</strong> content links &mdash; removed <strong>19,474</strong> non-content links (navigation, header, footer, aside)
+        </div>
+
+        <button class="btn btn-primary">Confirm &amp; Continue &#8594;</button>
+
+        <hr class="section-divider">
+
+        <!-- ===== CLEANING STEP 2 ===== -->
+        <div class="section-header">
+            <h2>Step 2 &mdash; Filter URL Patterns</h2>
+            <span class="badge">Cleaning</span>
+        </div>
+        <p class="section-subtitle">We detected recurring URL patterns. Toggle off the ones you want to exclude from analysis.</p>
+
+        <table class="wizard-table">
+            <thead>
+                <tr>
+                    <th style="text-align: center; width: 56px;">Keep</th>
+                    <th>Pattern</th>
+                    <th>Example URL</th>
+                    <th style="text-align: right;">Links</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td style="text-align: center;"><span class="toggle-switch toggle-on"></span></td>
+                    <td><strong>/mx/apuestas/*</strong></td>
+                    <td class="url-cell">/mx/apuestas/mejores-casas-de-apuestas</td>
+                    <td style="text-align: right;">6,234</td>
+                </tr>
+                <tr>
+                    <td style="text-align: center;"><span class="toggle-switch toggle-on"></span></td>
+                    <td><strong>/mx/noticias/*</strong></td>
+                    <td class="url-cell">/mx/noticias/liga-mx-resultado</td>
+                    <td style="text-align: right;">4,521</td>
+                </tr>
+                <tr>
+                    <td style="text-align: center;"><span class="toggle-switch toggle-on"></span></td>
+                    <td><strong>/mx/pronosticos/*</strong></td>
+                    <td class="url-cell">/mx/pronosticos/cruz-azul-america</td>
+                    <td style="text-align: right;">3,102</td>
+                </tr>
+                <tr>
+                    <td style="text-align: center;"><span class="toggle-switch toggle-off"></span></td>
+                    <td><strong>/mx/autor/*</strong></td>
+                    <td class="url-cell">/mx/autor/juan-perez</td>
+                    <td style="text-align: right;">890</td>
+                </tr>
+                <tr>
+                    <td style="text-align: center;"><span class="toggle-switch toggle-off"></span></td>
+                    <td><strong>/mx/page/*</strong></td>
+                    <td class="url-cell">/mx/page/2</td>
+                    <td style="text-align: right;">567</td>
+                </tr>
+                <tr>
+                    <td style="text-align: center;"><span class="toggle-switch toggle-off"></span></td>
+                    <td><strong>/mx/tag/*</strong></td>
+                    <td class="url-cell">/mx/tag/premier-league</td>
+                    <td style="text-align: right;">345</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="custom-pattern-row">
+            <span style="font-size: 13px; color: #6c757d;">Add custom pattern:</span>
+            <input type="text" placeholder="/mx/category/*">
+            <button class="btn btn-sm btn-secondary">+ Add</button>
+        </div>
+
+        <div class="summary-box">
+            Keeping <strong>13,857</strong> links from 3 patterns &mdash; excluding <strong>1,802</strong> links from 3 patterns (autor, page, tag)
+        </div>
+
+        <button class="btn btn-primary">Confirm &amp; Run Analysis &#8594;</button>
+
+        <hr class="section-divider">
+
+        <!-- ===== PROGRESS ===== -->
+        <div class="progress-section">
+            <h2>Analyzing your site...</h2>
+            <div class="progress-bar-bg">
+                <div class="progress-bar-fill"></div>
+            </div>
+            <p class="progress-text">Running AI semantic analysis (batch 3 of 5)...</p>
+        </div>
+
+        <hr class="section-divider">
+
+        <!-- ===== RESULTS: OVERVIEW ===== -->
+        <div class="section-header">
+            <h2>Overview</h2>
+            <span class="badge">Results</span>
+        </div>
+        <p class="section-subtitle">Summary of your cleaned link graph.</p>
+
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="value">2,345</div>
+                <div class="label">Pages</div>
+            </div>
+            <div class="stat-card">
+                <div class="value">13,857</div>
+                <div class="label">Internal Links</div>
+            </div>
+            <div class="stat-card">
+                <div class="value danger">23</div>
+                <div class="label">Orphan Pages</div>
+            </div>
+            <div class="stat-card">
+                <div class="value">5.9</div>
+                <div class="label">Avg Links / Page</div>
+            </div>
+        </div>
+
+        <p class="stat-detail">Links per page: min <strong>0</strong> &middot; avg <strong>5.9</strong> &middot; max <strong>47</strong></p>
+
+        <hr class="section-divider">
+
+        <!-- ===== RESULTS: PAGERANK ===== -->
+        <div class="section-header">
+            <h2>PageRank Distribution</h2>
+            <span class="badge">Results</span>
+        </div>
+        <p class="section-subtitle">How internal authority is distributed across your pages.</p>
+
+        <div class="chart-placeholder">
+            <div class="chart-bars">
+                <div class="chart-bar" style="height: 22px;"></div>
+                <div class="chart-bar" style="height: 45px;"></div>
+                <div class="chart-bar" style="height: 85px;"></div>
+                <div class="chart-bar" style="height: 130px;"></div>
+                <div class="chart-bar" style="height: 150px;"></div>
+                <div class="chart-bar" style="height: 115px;"></div>
+                <div class="chart-bar" style="height: 75px;"></div>
+                <div class="chart-bar" style="height: 50px;"></div>
+                <div class="chart-bar" style="height: 32px;"></div>
+                <div class="chart-bar" style="height: 18px;"></div>
+                <div class="chart-bar" style="height: 10px;"></div>
+                <div class="chart-bar" style="height: 5px;"></div>
+            </div>
+            <div class="chart-label">
+                <span>Low PageRank</span>
+                <span>High PageRank</span>
+            </div>
+        </div>
+
+        <div class="section-header" style="margin-top: 20px;">
+            <h2 style="font-size: 15px;">Top 10 Pages by PageRank</h2>
+        </div>
+
+        <table class="data-table" style="margin-top: 10px;">
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>URL</th>
+                    <th style="text-align: right;">PageRank</th>
+                    <th style="text-align: right;">Inbound Links</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>1</td>
+                    <td class="url-cell">/mx/apuestas</td>
+                    <td style="text-align: right;"><strong>0.0456</strong></td>
+                    <td style="text-align: right;">234</td>
+                </tr>
+                <tr>
+                    <td>2</td>
+                    <td class="url-cell">/mx/apuestas/mejores-casas-de-apuestas</td>
+                    <td style="text-align: right;"><strong>0.0321</strong></td>
+                    <td style="text-align: right;">187</td>
+                </tr>
+                <tr>
+                    <td>3</td>
+                    <td class="url-cell">/mx/noticias</td>
+                    <td style="text-align: right;"><strong>0.0287</strong></td>
+                    <td style="text-align: right;">156</td>
+                </tr>
+                <tr>
+                    <td>4</td>
+                    <td class="url-cell">/mx/apuestas/codigo-promocional-betclic</td>
+                    <td style="text-align: right;"><strong>0.0198</strong></td>
+                    <td style="text-align: right;">98</td>
+                </tr>
+                <tr>
+                    <td>5</td>
+                    <td class="url-cell">/mx/pronosticos</td>
+                    <td style="text-align: right;"><strong>0.0176</strong></td>
+                    <td style="text-align: right;">89</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <hr class="section-divider">
+
+        <!-- ===== RESULTS: PRIORITY URLs ===== -->
+        <div class="section-header">
+            <h2>Priority URLs Health</h2>
+            <span class="badge">Results</span>
+        </div>
+        <p class="section-subtitle">How your priority pages are performing in terms of internal link support.</p>
+
+        <div class="legend">
+            <div class="legend-item"><span class="health-dot health-critical"></span> Critical (&lt;3 links)</div>
+            <div class="legend-item"><span class="health-dot health-warning"></span> Warning (3&ndash;7 links)</div>
+            <div class="legend-item"><span class="health-dot health-good"></span> Good (8+ links)</div>
+        </div>
+
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th style="width: 44px;">Health</th>
+                    <th>URL</th>
+                    <th>Target Keyword</th>
+                    <th>Type</th>
+                    <th style="text-align: right;">Links</th>
+                    <th style="text-align: right;">PageRank</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><span class="health-dot health-critical"></span></td>
+                    <td class="url-cell">/mx/apuestas/codigo-promo-caliente</td>
+                    <td>codigo promo caliente</td>
+                    <td><span class="content-type-badge ct-code">Code page</span></td>
+                    <td style="text-align: right;"><strong>1</strong></td>
+                    <td style="text-align: right;">0.0008</td>
+                </tr>
+                <tr>
+                    <td><span class="health-dot health-critical"></span></td>
+                    <td class="url-cell">/mx/casino/guia-ruleta-online</td>
+                    <td>ruleta online mexico</td>
+                    <td><span class="content-type-badge ct-guide">Guide</span></td>
+                    <td style="text-align: right;"><strong>0</strong></td>
+                    <td style="text-align: right;">0.0000</td>
+                </tr>
+                <tr>
+                    <td><span class="health-dot health-warning"></span></td>
+                    <td class="url-cell">/mx/apuestas/mejores-bonos</td>
+                    <td>mejores bonos apuestas</td>
+                    <td><span class="content-type-badge ct-comparator">Comparator</span></td>
+                    <td style="text-align: right;">4</td>
+                    <td style="text-align: right;">0.0123</td>
+                </tr>
+                <tr>
+                    <td><span class="health-dot health-good"></span></td>
+                    <td class="url-cell">/mx/apuestas/codigo-promocional-betclic</td>
+                    <td>codigo betclic</td>
+                    <td><span class="content-type-badge ct-code">Code page</span></td>
+                    <td style="text-align: right;">14</td>
+                    <td style="text-align: right;">0.0198</td>
+                </tr>
+                <tr>
+                    <td><span class="health-dot health-good"></span></td>
+                    <td class="url-cell">/mx/apuestas/resena-bet365</td>
+                    <td>bet365 mexico</td>
+                    <td><span class="content-type-badge ct-review">Review</span></td>
+                    <td style="text-align: right;">11</td>
+                    <td style="text-align: right;">0.0167</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <hr class="section-divider">
+
+        <!-- ===== RESULTS: AI RECOMMENDATIONS ===== -->
+        <div class="section-header">
+            <h2>AI Link Recommendations</h2>
+            <span class="badge">Results</span>
+        </div>
+        <p class="section-subtitle">AI-generated linking opportunities based on semantic analysis and PageRank strategy.</p>
+
+        <div class="filter-chips">
+            <span class="chip active">All (47)</span>
+            <span class="chip">To add (38)</span>
+            <span class="chip">To remove (9)</span>
+        </div>
+
+        <div class="reco-card">
+            <div class="reco-header">
+                <span class="status-badge status-add">to add</span>
+                <span style="font-size: 11px; color: #6c757d;">High priority &mdash; code page with 1 link</span>
+            </div>
+            <div class="reco-link-flow">
+                <span class="url-cell">/mx/noticias/liga-mx-jornada-15</span>
+                <span class="arrow">&#8594;</span>
+                <span class="url-cell">/mx/apuestas/codigo-promo-caliente</span>
+            </div>
+            <div>
+                <span style="font-size: 11px; color: #6c757d;">Suggested anchor:</span>
+                <span class="anchor-suggestion">"c&oacute;digo promocional Caliente"</span>
+            </div>
+            <p class="reason">High-PR source page (0.028). Target is a code page with only 1 inbound link. Both cover Liga MX betting &mdash; strong semantic match.</p>
+        </div>
+
+        <div class="reco-card">
+            <div class="reco-header">
+                <span class="status-badge status-add">to add</span>
+                <span style="font-size: 11px; color: #6c757d;">Orphan page &mdash; 0 inbound links</span>
+            </div>
+            <div class="reco-link-flow">
+                <span class="url-cell">/mx/apuestas/mejores-casas-de-apuestas</span>
+                <span class="arrow">&#8594;</span>
+                <span class="url-cell">/mx/casino/guia-ruleta-online</span>
+            </div>
+            <div>
+                <span style="font-size: 11px; color: #6c757d;">Suggested anchor:</span>
+                <span class="anchor-suggestion">"gu&iacute;a de ruleta online"</span>
+            </div>
+            <p class="reason">Target is an orphan page (0 inbound links). Source has high authority (PR 0.032) and covers related gambling topics. Adding this link rescues the page from isolation.</p>
+        </div>
+
+        <div class="reco-card">
+            <div class="reco-header">
+                <span class="status-badge status-remove">to remove</span>
+                <span style="font-size: 11px; color: #6c757d;">Irrelevant anchor text</span>
+            </div>
+            <div class="reco-link-flow">
+                <span class="url-cell">/mx/pronosticos/cruz-azul-america</span>
+                <span class="arrow">&#8594;</span>
+                <span class="url-cell">/mx/apuestas/codigo-promo-caliente</span>
+            </div>
+            <div>
+                <span style="font-size: 11px; color: #6c757d;">Current anchor:</span>
+                <span class="anchor-suggestion">"click aqu&iacute;"</span>
+            </div>
+            <p class="reason">Generic anchor text ("click aqu&iacute;") dilutes relevance. Recommend replacing with keyword-rich anchor or removing if the link context doesn't fit.</p>
+        </div>
+
+        <p style="text-align: center; color: #6c757d; font-size: 13px; margin-top: 14px;">
+            Showing 3 of 47 recommendations &mdash; full list available in the Excel export
+        </p>
+
+        <hr class="section-divider">
+
+        <!-- ===== DOWNLOAD ===== -->
+        <div class="download-section">
+            <h3>Download Linking Plan</h3>
+            <p>Excel spreadsheet with all existing links and AI recommendations.<br>
+            Columns: Source URL, Anchor, Target URL, Status (live / to add / to remove)</p>
+            <button class="btn btn-download">&#11015; Download Excel (.xlsx)</button>
+        </div>
+
+        <div class="footer">
+            Internal Link Analyzer &middot; Better Collective SEO Tools
+        </div>
+
+    </div>
+
+</body>
+</html>
