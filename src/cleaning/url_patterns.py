@@ -15,6 +15,9 @@ _PAGINATION_PARAMS = {"page", "p", "paged", "pg", "pagina", "offset", "start"}
 # Path patterns like /page/2, /pagina/3 (at the end of the path)
 _PAGINATION_PATH_RE = re.compile(r"/(?:page|p|pagina|paged)/\d+/?$", re.IGNORECASE)
 
+# Short numeric ending like /category/1, /tags/15 (last segment is a number under 100)
+_NUMERIC_ENDING_RE = re.compile(r"/(\d{1,2})/?$")
+
 
 def detect_pagination_urls(df: pd.DataFrame) -> dict:
     """Detect paginated URLs from Source and Destination columns.
@@ -60,6 +63,13 @@ def detect_pagination_urls(df: pd.DataFrame) -> dict:
                 # Extract the keyword (e.g., "page" from "/page/2")
                 segment = match.group().strip("/").split("/")[0]
                 patterns_found.add(f"/{segment}/N")
+        # Check short numeric endings (e.g., /category/1, /tags/15)
+        elif _NUMERIC_ENDING_RE.search(parsed.path):
+            num_match = _NUMERIC_ENDING_RE.search(parsed.path)
+            num = int(num_match.group(1))
+            if num < 100:
+                paginated.add(url)
+                patterns_found.add("/…/N (numeric ending)")
 
     # Count how many links involve paginated URLs
     link_count = 0

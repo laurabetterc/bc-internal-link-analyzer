@@ -152,13 +152,15 @@ def prepare_page_contexts(
     cleaned_df: pd.DataFrame,
     priority_df: pd.DataFrame,
     pagerank_scores: dict[str, float],
+    true_orphan_urls: set[str] | None = None,
 ) -> list[dict]:
     """Build structured context for pages that should be analyzed by AI.
 
-    Selects "interesting" pages: priority URLs + top PageRank pages + orphan pages.
+    Selects "interesting" pages: priority URLs + top PageRank pages + orphan pages + true orphans.
     For each page, includes URL, slug, keywords, anchors, PageRank, link counts.
     """
     all_pages = set(cleaned_df["Source"].unique()) | set(cleaned_df["Destination"].unique())
+    true_orphans = true_orphan_urls or set()
 
     # Inbound and outbound data
     inbound = cleaned_df.groupby("Destination").agg(
@@ -182,7 +184,7 @@ def prepare_page_contexts(
     pages_with_inbound = set(inbound.index)
     orphan_urls = all_pages - pages_with_inbound
 
-    interesting = priority_urls | top_pr_urls | orphan_urls
+    interesting = priority_urls | top_pr_urls | orphan_urls | true_orphans
     # Also include all pages that link to or from interesting pages
     # (for better cocoon detection), but cap at 300 total
     linked_to_interesting = set()
@@ -195,10 +197,11 @@ def prepare_page_contexts(
     all_interesting = interesting | linked_to_interesting
     # Cap at 300 to keep costs reasonable
     if len(all_interesting) > 300:
-        # Prioritize: priority URLs first, then top PR, then orphans, then linked
+        # Prioritize: priority URLs first, then top PR, then orphans, then true orphans, then linked
         ordered = list(priority_urls)
         ordered.extend(url for url in top_pr_urls if url not in priority_urls)
         ordered.extend(url for url in orphan_urls if url not in set(ordered))
+        ordered.extend(url for url in true_orphans if url not in set(ordered))
         ordered.extend(url for url in linked_to_interesting if url not in set(ordered))
         all_interesting = set(ordered[:300])
 
@@ -222,6 +225,7 @@ def prepare_page_contexts(
             "pagerank": round(pr_score, 8),
             "is_priority": url in priority_urls,
             "is_orphan": url in orphan_urls,
+            "is_true_orphan": url in true_orphans,
         }
 
         # Priority info
@@ -427,6 +431,8 @@ def find_link_opportunities(
                 desc += f"  ** PRIORITY PAGE **\n"
             if ctx.get("is_orphan"):
                 desc += f"  ** ORPHAN (0 inbound links) **\n"
+            if ctx.get("is_true_orphan"):
+                desc += f"  ** TRUE ORPHAN (not found in crawl — no links at all) **\n"
             if ctx.get("target_keyword"):
                 desc += f"  Target keyword: {ctx['target_keyword']}\n"
             if ctx.get("content_type"):
@@ -471,8 +477,9 @@ Pages in this batch:
 Rules for recommendations:
 1. **Priority pages need more links**: Pages marked PRIORITY that have few inbound links need new links pointing to them
 2. **Orphan pages need links**: Pages with 0 inbound links need at least one link
-3. **Cocoon strengthening**: Pages within the same operator cocoon should link to each other. The code page should receive links from all sibling pages in the cocoon
-4. **PageRank strategy**: High-PageRank pages should link to important pages that need a boost
+3. **True orphan pages are critical**: Pages marked TRUE ORPHAN have zero links — no page links to them AND they link to no page. They MUST receive at least one link from a semantically relevant page
+4. **Cocoon strengthening**: Pages within the same operator cocoon should link to each other. The code page should receive links from all sibling pages in the cocoon
+5. **PageRank strategy**: High-PageRank pages should link to important pages that need a boost
 5. **Semantic relevance**: Only recommend links between pages that are topically related
 6. **Anchor text**: Suggest natural, keyword-rich anchor text for each link. Use the target page's keyword when available. Avoid generic anchors like "click here"
 7. **Don't recommend links that already exist** — I've already filtered those
@@ -524,6 +531,7 @@ def run_ai_analysis(
     priority_df: pd.DataFrame,
     pagerank_scores: dict[str, float],
     progress_callback=None,
+    true_orphan_urls: set[str] | None = None,
 ) -> dict:
     """Orchestrate the full AI analysis pipeline.
 
@@ -532,6 +540,7 @@ def run_ai_analysis(
         priority_df: Priority URLs.
         pagerank_scores: PageRank scores per URL.
         progress_callback: Optional callable(step_name, progress_fraction).
+        true_orphan_urls: URLs from full site list not found in crawl (true orphans).
 
     Returns:
         Dictionary with:
@@ -556,7 +565,7 @@ def run_ai_analysis(
         progress_callback(phase="preparing", fraction=0.05)
 
     # Prepare context
-    contexts = prepare_page_contexts(cleaned_df, priority_df, pagerank_scores)
+    contexts = prepare_page_contexts(cleaned_df, priority_df, pagerank_scores, true_orphan_urls)
 
     if not contexts:
         return {

@@ -1025,8 +1025,11 @@ def render_analyzing():
                 )
 
             try:
+                # Pass true orphan URLs so the AI can suggest links to/from them
+                true_orphans = set(audit.get("true_orphan_pages", []))
                 ai_results = run_ai_analysis(
-                    cleaned, priority, scores, progress_callback=ai_progress
+                    cleaned, priority, scores, progress_callback=ai_progress,
+                    true_orphan_urls=true_orphans if true_orphans else None,
                 )
                 st.session_state.ai_results = ai_results
                 st.session_state.token_usage = ai_results.get("token_usage")
