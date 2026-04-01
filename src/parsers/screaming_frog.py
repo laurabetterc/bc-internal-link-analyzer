@@ -81,9 +81,9 @@ def parse_screaming_frog_csv(uploaded_file) -> tuple[pd.DataFrame | None, str]:
     # Drop rows where Source or Destination is missing
     df = df.dropna(subset=["Source", "Destination"])
 
-    # Normalize URLs: strip all whitespace variants (spaces, tabs, non-breaking spaces, zero-width)
-    df["Source"] = df["Source"].str.replace(r'[\s\u00a0\u200b]+$', '', regex=True).str.replace(r'^[\s\u00a0\u200b]+', '', regex=True)
-    df["Destination"] = df["Destination"].str.replace(r'[\s\u00a0\u200b]+$', '', regex=True).str.replace(r'^[\s\u00a0\u200b]+', '', regex=True)
+    # Normalize URLs: strip whitespace (including non-breaking spaces)
+    df["Source"] = df["Source"].str.replace('\u00a0', ' ', regex=False).str.replace('\u200b', '', regex=False).str.strip()
+    df["Destination"] = df["Destination"].str.replace('\u00a0', ' ', regex=False).str.replace('\u200b', '', regex=False).str.strip()
 
     # Remove external links (different domain than the primary site)
     df, _removed = _filter_external_links(df)

@@ -28,8 +28,8 @@ def parse_priority_urls_csv(uploaded_file) -> tuple[pd.DataFrame | None, str]:
     # Drop rows without a URL
     df = df.dropna(subset=["URL"])
 
-    # Normalize — strip all whitespace variants (spaces, tabs, non-breaking spaces, newlines)
-    df["URL"] = df["URL"].astype(str).str.replace(r'[\s\u00a0\u200b]+$', '', regex=True).str.replace(r'^[\s\u00a0\u200b]+', '', regex=True)
+    # Normalize — strip whitespace (including non-breaking spaces)
+    df["URL"] = df["URL"].astype(str).str.replace('\u00a0', ' ', regex=False).str.replace('\u200b', '', regex=False).str.strip()
     df["Target Keyword"] = df["Target Keyword"].fillna("").str.strip()
 
     # Handle optional Content Type
