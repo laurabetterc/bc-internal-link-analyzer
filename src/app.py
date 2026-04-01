@@ -459,7 +459,8 @@ def render_cleaning_step1():
 
     # Interactive table — toggle Keep directly in the table
     edit_df = summary[["Position", "Count"]].copy()
-    edit_df["Keep"] = edit_df["Position"].map(st.session_state.position_keep)
+    edit_df["Count"] = edit_df["Count"].astype(int)
+    edit_df["Keep"] = edit_df["Position"].map(st.session_state.position_keep).fillna(False).astype(bool)
 
     edited = st.data_editor(
         edit_df,

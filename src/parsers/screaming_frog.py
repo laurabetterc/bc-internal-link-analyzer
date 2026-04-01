@@ -73,15 +73,17 @@ def parse_screaming_frog_csv(uploaded_file) -> tuple[pd.DataFrame | None, str]:
         )
 
     # Keep only Hyperlink rows (ignore images, CSS, JS, etc.)
+    # Supports multiple Screaming Frog languages: English ("Hyperlink"), French ("Hyperlien"), etc.
     if "Type" in df.columns:
-        df = df[df["Type"] == "Hyperlink"].copy()
+        hyperlink_variants = {"Hyperlink", "Hyperlien", "Hiperenlace", "Hyperlink-Tag", "Collegamento ipertestuale"}
+        df = df[df["Type"].isin(hyperlink_variants)].copy()
 
     # Drop rows where Source or Destination is missing
     df = df.dropna(subset=["Source", "Destination"])
 
-    # Normalize URLs: strip whitespace
-    df["Source"] = df["Source"].str.strip()
-    df["Destination"] = df["Destination"].str.strip()
+    # Normalize URLs: strip all whitespace variants (spaces, tabs, non-breaking spaces, zero-width)
+    df["Source"] = df["Source"].str.replace(r'[\s\u00a0\u200b]+$', '', regex=True).str.replace(r'^[\s\u00a0\u200b]+', '', regex=True)
+    df["Destination"] = df["Destination"].str.replace(r'[\s\u00a0\u200b]+$', '', regex=True).str.replace(r'^[\s\u00a0\u200b]+', '', regex=True)
 
     # Remove external links (different domain than the primary site)
     df, _removed = _filter_external_links(df)
