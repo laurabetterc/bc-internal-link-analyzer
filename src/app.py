@@ -1,5 +1,6 @@
 """Internal Link Analyzer — Main Streamlit App."""
 
+import copy
 import os
 import sys
 import time
@@ -92,6 +93,10 @@ if "site_domain" not in st.session_state:
     st.session_state.site_domain = "unknown-site"
 if "ai_health" not in st.session_state:
     st.session_state.ai_health = None  # None = not checked yet
+if "post_excluded_urls" not in st.session_state:
+    st.session_state.post_excluded_urls = set()
+if "_original_ai_results" not in st.session_state:
+    st.session_state._original_ai_results = None
 
 
 def reset_analysis():
@@ -101,13 +106,14 @@ def reset_analysis():
         "url_patterns", "position_keep", "pattern_exclude", "exclude_patterns",
         "custom_patterns", "pagination_info", "remove_pagination", "manual_excluded_urls",
         "audit_results", "pagerank_scores", "ai_results", "cocoon_health_data", "token_usage",
-        "ai_health",
+        "ai_health", "_original_ai_results",
     ]:
         if key in st.session_state:
             if key == "exclude_patterns":
                 st.session_state[key] = []
             else:
                 st.session_state[key] = None
+    st.session_state.post_excluded_urls = set()
     st.session_state.site_domain = "unknown-site"
     st.session_state.wizard_step = "upload"
 
@@ -835,6 +841,11 @@ def _start_analysis():
 def render_analyzing():
     """Run all analysis steps with visible progress, then switch to results."""
     cleaned = st.session_state.cleaned_data
+    # Apply post-analysis URL exclusions (for AI re-runs after refining results)
+    post_excluded = st.session_state.get("post_excluded_urls", set())
+    if post_excluded:
+        mask = cleaned["Source"].isin(post_excluded) | cleaned["Destination"].isin(post_excluded)
+        cleaned = cleaned[~mask].copy()
     priority = st.session_state.priority_data
 
     # Auto-scroll to top on page load
@@ -1091,6 +1102,8 @@ def render_analyzing():
             f"\u2705 Complete \u2014 {_fmt_time(time.time() - start_time)}</p>",
             unsafe_allow_html=True,
         )
+        # Save original AI results for post-analysis filtering (before any exclusions)
+        st.session_state._original_ai_results = copy.deepcopy(st.session_state.ai_results)
         time.sleep(1)
         st.session_state.wizard_step = "results"
         st.rerun()
@@ -1103,6 +1116,200 @@ def render_analyzing():
         st.error(f"Analysis could not complete: {analysis_error}")
         if st.button("Try Again", use_container_width=True):
             st.session_state.wizard_step = "step2"
+            st.rerun()
+
+
+def get_effective_data():
+    """Get cleaned data with post-analysis exclusions applied."""
+    cleaned = st.session_state.cleaned_data
+    excluded = st.session_state.get("post_excluded_urls", set())
+    if not excluded:
+        return cleaned
+    mask = cleaned["Source"].isin(excluded) | cleaned["Destination"].isin(excluded)
+    return cleaned[~mask].copy()
+
+
+def recalculate_with_exclusions():
+    """Recalculate audit + PageRank instantly, filter AI results from originals."""
+    excluded = st.session_state.post_excluded_urls
+    effective = get_effective_data()
+
+    # Recalculate audit
+    full_url_list = st.session_state.full_url_list
+    effective_url_list = (full_url_list - excluded) if (full_url_list and excluded) else full_url_list
+    st.session_state.audit_results = compute_link_audit(effective, full_url_list=effective_url_list)
+
+    # Recalculate PageRank
+    st.session_state.pagerank_scores = compute_pagerank(effective) if len(effective) > 0 else {}
+
+    # Filter AI results from originals (not from already-filtered results)
+    original_ai = st.session_state.get("_original_ai_results")
+    if original_ai:
+        ai_results = copy.deepcopy(original_ai)
+
+        if excluded:
+            # Filter recommendations
+            ai_results["recommendations"] = [
+                r for r in ai_results.get("recommendations", [])
+                if r.get("source_url") not in excluded and r.get("target_url") not in excluded
+            ]
+            # Filter cocoons
+            filtered_cocoons = []
+            for cocoon in ai_results.get("cocoons", []):
+                if cocoon.get("code_page") in excluded:
+                    continue
+                new_pages = [p for p in cocoon.get("pages", []) if p not in excluded]
+                if new_pages:
+                    filtered_cocoons.append({**cocoon, "pages": new_pages})
+            ai_results["cocoons"] = filtered_cocoons
+
+        st.session_state.ai_results = ai_results
+
+        # Recompute cocoon health on the effective link data
+        if ai_results.get("cocoons"):
+            st.session_state.cocoon_health_data = analyze_cocoon_health(
+                ai_results["cocoons"], effective,
+            )
+        else:
+            st.session_state.cocoon_health_data = None
+
+
+def _find_matching_urls(input_text, all_urls):
+    """Find URLs matching user input (full URLs or substring patterns)."""
+    matched = set()
+    for line in input_text.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("http"):
+            # Exact URL match
+            if line in all_urls:
+                matched.add(line)
+        else:
+            # Substring match — find all URLs containing this fragment
+            for url in all_urls:
+                if line in url:
+                    matched.add(url)
+    return matched
+
+
+def _render_refine_panel():
+    """Render the post-analysis URL exclusion panel on the results screen."""
+    current_excluded = st.session_state.post_excluded_urls
+    all_urls = (
+        set(st.session_state.cleaned_data["Source"].unique())
+        | set(st.session_state.cleaned_data["Destination"].unique())
+    )
+
+    # Expander label changes based on state
+    if current_excluded:
+        label = f"Refine results — {len(current_excluded):,} URLs excluded"
+    else:
+        label = "Refine results — exclude more URLs"
+
+    with st.expander(label, expanded=False):
+        st.markdown(
+            "<p style='color:#94A3B8;font-size:13px;margin-bottom:12px;'>"
+            "Spotted URLs that should have been excluded? Add them here and recalculate instantly — "
+            "no need to re-run the full AI analysis. Enter full URLs or a path fragment "
+            "(e.g. <code>/category/</code>) to match multiple URLs.</p>",
+            unsafe_allow_html=True,
+        )
+
+        url_input = st.text_area(
+            "URLs or patterns to exclude",
+            placeholder="Paste URLs or enter path fragments, one per line\n"
+                        "Examples:\n"
+                        "https://example.com/category/page\n"
+                        "/author/\n"
+                        "/tag/",
+            height=100,
+            label_visibility="collapsed",
+            key="refine_url_input",
+        )
+
+        # Preview matches
+        if url_input and url_input.strip():
+            matched = _find_matching_urls(url_input, all_urls)
+            new_matched = matched - current_excluded
+            if new_matched:
+                mask = (
+                    st.session_state.cleaned_data["Source"].isin(new_matched)
+                    | st.session_state.cleaned_data["Destination"].isin(new_matched)
+                )
+                affected_links = mask.sum()
+                st.markdown(
+                    f"<p style='color:#FBBF24;font-size:13px;'>"
+                    f"Matched <strong>{len(new_matched):,}</strong> new URLs "
+                    f"({affected_links:,} links affected).</p>",
+                    unsafe_allow_html=True,
+                )
+                with st.expander(f"Preview matched URLs ({len(new_matched)})"):
+                    st.dataframe(
+                        pd.DataFrame({"URL": sorted(new_matched)}),
+                        use_container_width=True, hide_index=True, height=200,
+                    )
+            elif matched:
+                st.markdown(
+                    "<p style='color:#64748B;font-size:13px;'>All matched URLs are already excluded.</p>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    "<p style='color:#64748B;font-size:13px;'>No matching URLs found in the data.</p>",
+                    unsafe_allow_html=True,
+                )
+
+        # Show current exclusions
+        if current_excluded:
+            st.markdown(
+                f"<p style='color:#94A3B8;font-size:13px;margin-top:12px;'>"
+                f"Currently excluding <strong style='color:#F87171;'>{len(current_excluded):,}</strong> URLs.</p>",
+                unsafe_allow_html=True,
+            )
+            with st.expander(f"View excluded URLs ({len(current_excluded)})"):
+                st.dataframe(
+                    pd.DataFrame({"URL": sorted(current_excluded)}),
+                    use_container_width=True, hide_index=True, height=200,
+                )
+
+        # Action buttons
+        btn_cols = st.columns(3)
+        with btn_cols[0]:
+            add_clicked = st.button(
+                "Exclude & Recalculate",
+                use_container_width=True,
+                disabled=not (url_input and url_input.strip()),
+                type="primary",
+            )
+        with btn_cols[1]:
+            clear_clicked = st.button(
+                "Clear all exclusions",
+                use_container_width=True,
+                disabled=not current_excluded,
+            )
+        with btn_cols[2]:
+            rerun_ai_clicked = st.button(
+                "Re-run AI analysis",
+                use_container_width=True,
+                disabled=not current_excluded,
+                help="Re-runs the full Gemini AI analysis on the filtered data. Takes several minutes.",
+            )
+
+        if add_clicked and url_input and url_input.strip():
+            new_urls = _find_matching_urls(url_input, all_urls)
+            if new_urls:
+                st.session_state.post_excluded_urls |= new_urls
+                recalculate_with_exclusions()
+                st.rerun()
+
+        if clear_clicked:
+            st.session_state.post_excluded_urls = set()
+            recalculate_with_exclusions()
+            st.rerun()
+
+        if rerun_ai_clicked:
+            st.session_state.wizard_step = "analyzing"
             st.rerun()
 
 
@@ -1119,7 +1326,7 @@ def render_results():
 
     audit = st.session_state.audit_results
     scores = st.session_state.pagerank_scores
-    cleaned = st.session_state.cleaned_data
+    cleaned = get_effective_data()  # cleaned_data minus post-analysis exclusions
     priority = st.session_state.priority_data
 
     # Results header with "New Analysis" button
@@ -1137,6 +1344,9 @@ def render_results():
         f"across <strong style='color:#FFFFFF;'>{audit['total_pages']:,}</strong> pages.</p>",
         unsafe_allow_html=True,
     )
+
+    # ---- Refine: Exclude more URLs (post-analysis) ----
+    _render_refine_panel()
 
     # ---- Overview stat cards ----
     st.markdown(f"### Overview {render_badge('Audit')}", unsafe_allow_html=True)
