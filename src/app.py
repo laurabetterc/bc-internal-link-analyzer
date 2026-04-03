@@ -35,7 +35,10 @@ from src.config import APP_PASSWORD, GEMINI_API_KEY, HEALTH_CRITICAL_MAX, HEALTH
 from src.parsers.screaming_frog import get_primary_domain, parse_screaming_frog_csv
 from src.parsers.priority_urls import parse_priority_urls_csv
 from src.cleaning.link_position import get_position_summary, filter_by_positions
-from src.cleaning.url_patterns import detect_url_patterns, filter_by_patterns, detect_pagination_urls, filter_pagination
+from src.cleaning.url_patterns import (
+    detect_url_patterns, filter_by_patterns, detect_pagination_urls, filter_pagination,
+    detect_template_links, filter_template_links,
+)
 from src.analysis.link_audit import compute_link_audit, get_priority_urls_health
 from src.analysis.pagerank import compute_pagerank, get_top_pages, get_pagerank_distribution
 from src.analysis.ai_analyzer import run_ai_analysis, get_token_usage, check_api_health
@@ -105,6 +108,7 @@ def reset_analysis():
         "sf_data", "priority_data", "full_url_list", "cleaned_data", "position_filtered_data",
         "url_patterns", "position_keep", "pattern_exclude", "exclude_patterns",
         "custom_patterns", "pagination_info", "remove_pagination", "manual_excluded_urls",
+        "template_links_info", "remove_template_links",
         "audit_results", "pagerank_scores", "ai_results", "cocoon_health_data", "token_usage",
         "ai_health", "_original_ai_results",
     ]:
@@ -566,6 +570,49 @@ def render_cleaning_step2():
         )
         st.markdown("<br>", unsafe_allow_html=True)
 
+    # ---- Template link detection (false "Content" links) ----
+    if "template_links_info" not in st.session_state:
+        st.session_state.template_links_info = detect_template_links(df)
+    if "remove_template_links" not in st.session_state:
+        st.session_state.remove_template_links = True
+
+    template = st.session_state.template_links_info
+    if template["total_paths"] > 0:
+        st.markdown("#### Sitewide template links detected", unsafe_allow_html=True)
+        st.markdown(
+            f"<p style='color:#94A3B8;font-size:14px;margin-bottom:8px;'>"
+            f"Found <strong style='color:#F87171;'>{template['total_paths']}</strong> link positions "
+            f"that repeat on many pages — these are likely navigation bars or menus that "
+            f"Screaming Frog mislabeled as \"Content\" because the HTML uses "
+            f"<code>&lt;div&gt;</code> instead of <code>&lt;nav&gt;</code>.</p>",
+            unsafe_allow_html=True,
+        )
+
+        with st.expander(
+            f"View {template['total_paths']} template patterns ({template['total_links']:,} links)",
+            expanded=False,
+        ):
+            for tp in template["paths"]:
+                anchors_str = ", ".join(f"**{a}**" for a in tp["anchors"][:3]) if tp["anchors"] else "—"
+                st.markdown(
+                    f"<div style='border-left:3px solid rgba(248,113,113,0.4);padding:6px 12px;"
+                    f"margin-bottom:8px;background:rgba(248,113,113,0.05);border-radius:0 6px 6px 0;'>"
+                    f"<span style='font-family:JetBrains Mono,monospace;font-size:11px;color:#64748B;'>"
+                    f"{tp['path']}</span><br>"
+                    f"<span style='font-size:13px;color:#F0F4F8;'>Anchors: {anchors_str}</span>"
+                    f"<span style='font-size:12px;color:#64748B;float:right;'>"
+                    f"{tp['page_count']:,} pages ({tp['page_ratio']:.0%}) · "
+                    f"{tp['link_count']:,} links</span></div>",
+                    unsafe_allow_html=True,
+                )
+
+        st.session_state.remove_template_links = st.checkbox(
+            f"Remove template links ({template['total_links']:,} links across {template['total_paths']} patterns)",
+            value=st.session_state.remove_template_links,
+            key="template_toggle",
+        )
+        st.markdown("<br>", unsafe_allow_html=True)
+
     # Detect patterns (cached)
     if "url_patterns" not in st.session_state:
         st.session_state.url_patterns = detect_url_patterns(df)
@@ -575,7 +622,12 @@ def render_cleaning_step2():
     if patterns_df.empty:
         st.info("No recurring URL patterns detected. All links will be included.")
         if st.button("Run Analysis", use_container_width=True):
-            st.session_state.cleaned_data = df
+            cleaned = df
+            # Apply template link filter even if no URL patterns
+            if st.session_state.get("remove_template_links", False) and template["total_paths"] > 0:
+                tpl_paths = [tp["path"] for tp in template["paths"]]
+                cleaned = filter_template_links(cleaned, tpl_paths)
+            st.session_state.cleaned_data = cleaned
             _start_analysis()
         return
 
@@ -805,7 +857,13 @@ def render_cleaning_step2():
         st.session_state.wizard_step = "step1"
         st.rerun()
     if st.button("Run Analysis →", use_container_width=True):
-            cleaned = filter_by_patterns(df, exclude_patterns)
+            cleaned = df
+            # Apply template link filter (removes individual link rows by Link Path)
+            if st.session_state.get("remove_template_links", False) and template["total_paths"] > 0:
+                tpl_paths = [tp["path"] for tp in template["paths"]]
+                cleaned = filter_template_links(cleaned, tpl_paths)
+            # Apply URL pattern filter (removes all links involving matched URLs)
+            cleaned = filter_by_patterns(cleaned, exclude_patterns)
             # Apply pagination filter
             if st.session_state.get("remove_pagination", False) and pagination["count"] > 0:
                 cleaned = filter_pagination(cleaned, pagination["urls"])

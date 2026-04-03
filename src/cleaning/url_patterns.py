@@ -96,6 +96,91 @@ def filter_pagination(df: pd.DataFrame, pagination_urls: set) -> pd.DataFrame:
     return df[~mask].copy()
 
 
+# ---- Template link detection (false "Content" links) ----
+
+
+def detect_template_links(df: pd.DataFrame, min_page_ratio: float = 0.5, min_pages: int = 50) -> dict:
+    """Detect links labeled 'Content' that are actually sitewide template elements.
+
+    Sites with non-semantic HTML (e.g. <div> instead of <nav>) cause Screaming Frog
+    to misclassify navigation bars, sticky menus, or sidebar widgets as 'Content' links.
+
+    Detection: if the same Link Path (XPath) appears on a high percentage of source
+    pages, it's a repeated template element — not editorial content.
+
+    Args:
+        df: DataFrame from Screaming Frog with Link Path and Link Position columns.
+        min_page_ratio: Minimum fraction of pages a path must appear on (default 0.5 = 50%).
+        min_pages: Minimum absolute page count (default 50).
+
+    Returns dict with:
+        paths: list of dicts (path, anchors, destinations, page_count, page_ratio, link_count)
+        total_links: total links affected across all template paths
+        total_paths: number of template paths found
+    """
+    if "Link Path" not in df.columns or "Link Position" not in df.columns:
+        return {"paths": [], "total_links": 0, "total_paths": 0}
+
+    # Only examine links Screaming Frog labeled "Content" — that's where false positives hide
+    content_links = df[df["Link Position"] == "Content"].copy()
+    if content_links.empty:
+        return {"paths": [], "total_links": 0, "total_paths": 0}
+
+    # Drop rows with missing Link Path
+    content_links = content_links.dropna(subset=["Link Path"])
+    if content_links.empty:
+        return {"paths": [], "total_links": 0, "total_paths": 0}
+
+    total_source_pages = df["Source"].nunique()
+    threshold = max(min_pages, int(total_source_pages * min_page_ratio))
+
+    # Count unique source pages per Link Path
+    path_pages = content_links.groupby("Link Path")["Source"].nunique()
+    template_paths = path_pages[path_pages >= threshold]
+
+    if template_paths.empty:
+        return {"paths": [], "total_links": 0, "total_paths": 0}
+
+    # Collect details for each template path
+    paths_info = []
+    total_links = 0
+    for path, page_count in template_paths.items():
+        path_data = content_links[content_links["Link Path"] == path]
+        anchors = path_data["Anchor"].value_counts().head(3).index.tolist()
+        destinations = path_data["Destination"].value_counts().head(2).index.tolist()
+        link_count = len(path_data)
+        total_links += link_count
+        paths_info.append({
+            "path": path,
+            "anchors": anchors,
+            "destinations": destinations,
+            "page_count": int(page_count),
+            "page_ratio": page_count / total_source_pages,
+            "link_count": link_count,
+        })
+
+    # Sort by page count descending
+    paths_info.sort(key=lambda x: x["page_count"], reverse=True)
+
+    return {
+        "paths": paths_info,
+        "total_links": total_links,
+        "total_paths": len(paths_info),
+    }
+
+
+def filter_template_links(df: pd.DataFrame, template_paths: list[str]) -> pd.DataFrame:
+    """Remove links whose Link Path matches any of the given template paths.
+
+    Unlike URL pattern filtering (which removes entire URLs), this removes
+    individual link rows — a URL can still appear via other non-template links.
+    """
+    if not template_paths or "Link Path" not in df.columns:
+        return df.copy()
+    path_set = set(template_paths)
+    return df[~df["Link Path"].isin(path_set)].copy()
+
+
 def extract_path_prefix(url: str, depth: int = 2) -> str:
     """Extract path prefix up to a given depth.
 
