@@ -31,7 +31,7 @@ import src.config
 importlib.reload(src.config)
 
 from src.config import APP_PASSWORD, GEMINI_API_KEY, HEALTH_CRITICAL_MAX, HEALTH_WARNING_MAX
-from src.parsers.screaming_frog import parse_screaming_frog_csv
+from src.parsers.screaming_frog import get_primary_domain, parse_screaming_frog_csv
 from src.parsers.priority_urls import parse_priority_urls_csv
 from src.cleaning.link_position import get_position_summary, filter_by_positions
 from src.cleaning.url_patterns import detect_url_patterns, filter_by_patterns, detect_pagination_urls, filter_pagination
@@ -40,6 +40,7 @@ from src.analysis.pagerank import compute_pagerank, get_top_pages, get_pagerank_
 from src.analysis.ai_analyzer import run_ai_analysis, get_token_usage, check_api_health
 from src.analysis.cocoon_health import analyze_cocoon_health
 from src.export.csv_export import generate_linking_plan_csv
+from src.export.html_report import generate_html_report
 from src.ui.components import (
     apply_bc_theme,
     render_header,
@@ -87,6 +88,8 @@ if "cocoon_health_data" not in st.session_state:
     st.session_state.cocoon_health_data = None
 if "token_usage" not in st.session_state:
     st.session_state.token_usage = None
+if "site_domain" not in st.session_state:
+    st.session_state.site_domain = "unknown-site"
 if "ai_health" not in st.session_state:
     st.session_state.ai_health = None  # None = not checked yet
 
@@ -105,6 +108,7 @@ def reset_analysis():
                 st.session_state[key] = []
             else:
                 st.session_state[key] = None
+    st.session_state.site_domain = "unknown-site"
     st.session_state.wizard_step = "upload"
 
 
@@ -286,6 +290,7 @@ def render_upload():
                 st.error(f"Screaming Frog CSV error: {error}")
             else:
                 st.session_state.sf_data = df
+                st.session_state.site_domain = get_primary_domain(df)
 
         if st.session_state.sf_data is not None:
             render_upload_confirmation(
@@ -1523,30 +1528,62 @@ def render_results():
         st.markdown(
             f"<p style='color:#64748B;font-size:12px;margin-top:8px;'>"
             f"Total: {total:,} tokens. "
-            f"Estimated cost: ~${(token_usage['prompt_tokens'] * 0.10 + token_usage['completion_tokens'] * 0.40) / 1_000_000:.4f} "
-            f"(free tier: 20 req/day, 1M tokens/day)</p>",
+            f"Estimated cost: ~${(token_usage['prompt_tokens'] * 0.30 + (token_usage['completion_tokens'] + token_usage['thinking_tokens']) * 2.50) / 1_000_000:.4f} "
+            f"(free tier available — see ai.google.dev/gemini-api/docs/pricing)</p>",
             unsafe_allow_html=True,
         )
 
-    # ---- CSV Download ----
+    # ---- Downloads ----
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("---")
     st.markdown("<br>", unsafe_allow_html=True)
 
     recommendations = ai_results.get("recommendations", []) if ai_results else []
 
+    # Dynamic filename: site-name-YYYY-MM-DD
+    from datetime import datetime as _dt
+    site_slug = st.session_state.site_domain.replace(".", "-")
+    date_slug = _dt.now().strftime("%Y-%m-%d")
+    base_name = f"{site_slug}-{date_slug}"
+
+    # CSV linking plan
     csv_content = generate_linking_plan_csv(
         cleaned_df=cleaned,
         recommendations=recommendations,
     )
 
-    st.download_button(
-        label="Download Linking Plan (CSV)",
-        data=csv_content,
-        file_name="linking-plan.csv",
-        mime="text/csv",
-        use_container_width=True,
+    # HTML report
+    health_df = get_priority_urls_health(
+        cleaned, priority, pagerank_scores=scores,
+        critical_max=HEALTH_CRITICAL_MAX, warning_max=HEALTH_WARNING_MAX,
     )
+    html_content = generate_html_report(
+        site_domain=st.session_state.site_domain,
+        audit=audit,
+        pagerank_scores=scores,
+        priority_health_df=health_df,
+        cocoon_health_df=st.session_state.cocoon_health_data,
+        recommendations=recommendations,
+        token_usage=st.session_state.token_usage,
+    )
+
+    dl1, dl2 = st.columns(2)
+    with dl1:
+        st.download_button(
+            label="Download Linking Plan (CSV)",
+            data=csv_content,
+            file_name=f"{base_name}-linking-plan.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    with dl2:
+        st.download_button(
+            label="Download Full Report (HTML)",
+            data=html_content,
+            file_name=f"{base_name}-report.html",
+            mime="text/html",
+            use_container_width=True,
+        )
 
 
 # ============================================================

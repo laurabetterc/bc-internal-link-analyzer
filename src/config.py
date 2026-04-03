@@ -20,7 +20,7 @@ PAGERANK_DAMPING = 0.85
 PAGERANK_MAX_ITER = 100
 
 # App password (set via environment variable)
-APP_PASSWORD = os.environ.get("ILA_PASSWORD", "bcseo2026")
+APP_PASSWORD = os.environ.get("ILA_PASSWORD", "")
 
 # Screaming Frog expected columns
 SF_REQUIRED_COLUMNS = [

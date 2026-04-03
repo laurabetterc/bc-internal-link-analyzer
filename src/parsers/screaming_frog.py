@@ -51,6 +51,16 @@ def _filter_external_links(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     return df[mask].copy(), removed
 
 
+def get_primary_domain(df: pd.DataFrame) -> str:
+    """Extract the primary domain from the Source column (most frequent domain)."""
+    source_domains = df["Source"].apply(_get_domain)
+    domain_counts = Counter(source_domains)
+    if not domain_counts:
+        return "unknown-site"
+    primary = domain_counts.most_common(1)[0][0]
+    return primary or "unknown-site"
+
+
 def parse_screaming_frog_csv(uploaded_file) -> tuple[pd.DataFrame | None, str]:
     """Parse a Screaming Frog All Inlinks CSV.
 
