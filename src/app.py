@@ -1801,26 +1801,20 @@ def render_results():
             unsafe_allow_html=True,
         )
 
-    # ---- Downloads ----
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("---")
-    st.markdown("<br>", unsafe_allow_html=True)
+    # ---- Sticky download banner ----
+    import base64
+    from datetime import datetime as _dt
 
     recommendations = ai_results.get("recommendations", []) if ai_results else []
 
-    # Dynamic filename: site-name-YYYY-MM-DD
-    from datetime import datetime as _dt
     site_slug = st.session_state.site_domain.replace(".", "-")
     date_slug = _dt.now().strftime("%Y-%m-%d")
     base_name = f"{site_slug}-{date_slug}"
 
-    # CSV linking plan
     csv_content = generate_linking_plan_csv(
         cleaned_df=cleaned,
         recommendations=recommendations,
     )
-
-    # HTML report
     health_df = get_priority_urls_health(
         cleaned, priority, pagerank_scores=scores,
         critical_max=HEALTH_CRITICAL_MAX, warning_max=HEALTH_WARNING_MAX,
@@ -1835,23 +1829,82 @@ def render_results():
         token_usage=st.session_state.token_usage,
     )
 
-    dl1, dl2 = st.columns(2)
-    with dl1:
-        st.download_button(
-            label="Download Linking Plan (CSV)",
-            data=csv_content,
-            file_name=f"{base_name}-linking-plan.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-    with dl2:
-        st.download_button(
-            label="Download Full Report (HTML)",
-            data=html_content,
-            file_name=f"{base_name}-report.html",
-            mime="text/html",
-            use_container_width=True,
-        )
+    csv_b64 = base64.b64encode(csv_content.encode("utf-8")).decode()
+    html_b64 = base64.b64encode(html_content.encode("utf-8")).decode()
+
+    # Bottom padding so content isn't hidden behind the sticky bar
+    st.markdown("<div style='height:80px;'></div>", unsafe_allow_html=True)
+
+    st.markdown(
+        f"""
+        <style>
+        .sticky-dl-bar {{
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            z-index: 999;
+            background: rgba(15, 23, 42, 0.85);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border-top: 1px solid rgba(52, 211, 153, 0.2);
+            padding: 12px 24px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 16px;
+        }}
+        .sticky-dl-bar .dl-label {{
+            color: #94A3B8;
+            font-family: 'DM Sans', sans-serif;
+            font-size: 13px;
+            margin-right: 8px;
+        }}
+        .sticky-dl-bar a {{
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 20px;
+            border-radius: 8px;
+            font-family: 'DM Sans', sans-serif;
+            font-size: 13px;
+            font-weight: 600;
+            text-decoration: none;
+            transition: all 0.2s ease;
+        }}
+        .sticky-dl-bar a.dl-csv {{
+            background: linear-gradient(135deg, #0EA5E9, #0284C7);
+            color: #FFFFFF;
+        }}
+        .sticky-dl-bar a.dl-csv:hover {{
+            box-shadow: 0 0 16px rgba(14, 165, 233, 0.4);
+            transform: translateY(-1px);
+        }}
+        .sticky-dl-bar a.dl-html {{
+            background: linear-gradient(135deg, #34D399, #059669);
+            color: #FFFFFF;
+        }}
+        .sticky-dl-bar a.dl-html:hover {{
+            box-shadow: 0 0 16px rgba(52, 211, 153, 0.4);
+            transform: translateY(-1px);
+        }}
+        </style>
+        <div class="sticky-dl-bar">
+            <span class="dl-label">Downloads</span>
+            <a class="dl-csv"
+               href="data:text/csv;base64,{csv_b64}"
+               download="{base_name}-linking-plan.csv">
+                Linking Plan (CSV)
+            </a>
+            <a class="dl-html"
+               href="data:text/html;base64,{html_b64}"
+               download="{base_name}-report.html">
+                Full Report (HTML)
+            </a>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # ============================================================
