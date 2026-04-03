@@ -466,7 +466,7 @@ def render_cleaning_step1():
     summary = get_position_summary(df)
 
     # Initialize keep state
-    if "position_keep" not in st.session_state:
+    if not st.session_state.get("position_keep"):
         st.session_state.position_keep = {
             row["Position"]: row["Action"] == "Keep"
             for _, row in summary.iterrows()
@@ -531,9 +531,9 @@ def render_cleaning_step2():
     df = st.session_state.position_filtered_data
 
     # ---- Pagination detection ----
-    if "pagination_info" not in st.session_state:
+    if not st.session_state.get("pagination_info"):
         st.session_state.pagination_info = detect_pagination_urls(df)
-    if "remove_pagination" not in st.session_state:
+    if st.session_state.get("remove_pagination") is None:
         st.session_state.remove_pagination = True
 
     pagination = st.session_state.pagination_info
@@ -571,9 +571,9 @@ def render_cleaning_step2():
         st.markdown("<br>", unsafe_allow_html=True)
 
     # ---- Template link detection (false "Content" links) ----
-    if "template_links_info" not in st.session_state:
+    if not st.session_state.get("template_links_info"):
         st.session_state.template_links_info = detect_template_links(df)
-    if "remove_template_links" not in st.session_state:
+    if st.session_state.get("remove_template_links") is None:
         st.session_state.remove_template_links = True
 
     template = st.session_state.template_links_info
@@ -614,7 +614,7 @@ def render_cleaning_step2():
         st.markdown("<br>", unsafe_allow_html=True)
 
     # Detect patterns (cached)
-    if "url_patterns" not in st.session_state:
+    if st.session_state.get("url_patterns") is None:
         st.session_state.url_patterns = detect_url_patterns(df)
 
     patterns_df = st.session_state.url_patterns
@@ -632,7 +632,7 @@ def render_cleaning_step2():
         return
 
     # Pattern toggles — check = exclude
-    if "pattern_exclude" not in st.session_state:
+    if not st.session_state.get("pattern_exclude"):
         st.session_state.pattern_exclude = {
             row["Pattern"]: row["Exclude"]
             for _, row in patterns_df.iterrows()
@@ -677,7 +677,7 @@ def render_cleaning_step2():
     st.markdown("<br>", unsafe_allow_html=True)
 
     # Initialize custom patterns list
-    if "custom_patterns" not in st.session_state:
+    if st.session_state.get("custom_patterns") is None:
         st.session_state.custom_patterns = []
 
     st.markdown(
@@ -781,7 +781,7 @@ def render_cleaning_step2():
         all_urls = [u for u in all_urls if u not in pagination_set]
 
     # Apply manual URL exclusions from the browser
-    if "manual_excluded_urls" not in st.session_state:
+    if st.session_state.get("manual_excluded_urls") is None:
         st.session_state.manual_excluded_urls = set()
     manual_excluded = st.session_state.manual_excluded_urls
     if manual_excluded:
