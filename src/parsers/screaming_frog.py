@@ -88,6 +88,34 @@ def parse_screaming_frog_csv(uploaded_file) -> tuple[pd.DataFrame | None, str]:
         hyperlink_variants = {"Hyperlink", "Hyperlien", "Hiperenlace", "Hyperlink-Tag", "Collegamento ipertestuale"}
         df = df[df["Type"].isin(hyperlink_variants)].copy()
 
+    # Normalize Link Position values to English
+    # Screaming Frog exports positions in the UI language — some exports mix languages
+    if "Link Position" in df.columns:
+        position_map = {
+            # French
+            "Contenu": "Content",
+            "En-tête": "Header",
+            "Entête": "Header",
+            "Pied de page": "Footer",
+            # Spanish
+            "Contenido": "Content",
+            "Navegación": "Navigation",
+            "Encabezado": "Header",
+            "Pie de página": "Footer",
+            "Lateral": "Aside",
+            # German
+            "Inhalt": "Content",
+            "Kopfzeile": "Header",
+            "Fußzeile": "Footer",
+            "Seitenleiste": "Aside",
+            # Italian
+            "Contenuto": "Content",
+            "Navigazione": "Navigation",
+            "Intestazione": "Header",
+            "Piè di pagina": "Footer",
+        }
+        df["Link Position"] = df["Link Position"].replace(position_map)
+
     # Drop rows where Source or Destination is missing
     df = df.dropna(subset=["Source", "Destination"])
 
