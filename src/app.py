@@ -1446,23 +1446,31 @@ def render_results():
         c1, c2, c3, c4, c5 = st.columns(5)
     else:
         c1, c2, c3, c4 = st.columns(4)
+
+    _hint_css = "color:#64748B;font-size:11px;text-align:center;margin-top:6px;"
+
     with c1:
         st.markdown(render_stat_card(f"{audit['total_pages']:,}", "Total Pages"), unsafe_allow_html=True)
+        st.markdown(f"<p style='{_hint_css}'>Unique pages found in the crawl after cleaning</p>", unsafe_allow_html=True)
     with c2:
         st.markdown(render_stat_card(f"{audit['total_links']:,}", "Internal Links"), unsafe_allow_html=True)
+        st.markdown(f"<p style='{_hint_css}'>Content links between pages (no nav/footer)</p>", unsafe_allow_html=True)
     with c3:
         st.markdown(
             render_stat_card(f"{audit['orphan_count']:,}", "Orphan Pages", danger=audit['orphan_count'] > 0),
             unsafe_allow_html=True,
         )
+        st.markdown(f"<p style='{_hint_css}'>Pages in the crawl with zero inbound content links</p>", unsafe_allow_html=True)
     with c4:
         st.markdown(render_stat_card(f"{audit['inbound_avg']}", "Avg Inbound Links", accent=True), unsafe_allow_html=True)
+        st.markdown(f"<p style='{_hint_css}'>Average number of content links pointing to each page</p>", unsafe_allow_html=True)
     if true_orphan_count > 0:
         with c5:
             st.markdown(
                 render_stat_card(f"{true_orphan_count:,}", "True Orphans", danger=True),
                 unsafe_allow_html=True,
             )
+            st.markdown(f"<p style='{_hint_css}'>Pages from your URL list not found in the crawl at all — completely invisible</p>", unsafe_allow_html=True)
 
     # ---- Link distribution details ----
     st.markdown("<br>", unsafe_allow_html=True)
