@@ -99,8 +99,8 @@ def apply_bc_theme():
         .stMainBlockContainer { padding-top: 0 !important; }
         [data-testid="stAppViewBlockContainer"] { padding-top: 0 !important; }
         #MainMenu { visibility: hidden; }
-        footer { visibility: hidden; }
-        header { visibility: hidden; }
+        .stApp > footer { visibility: hidden; }
+        header[data-testid="stHeader"] { visibility: hidden; }
 
         /* ===== HEADER ===== */
         .bc-header {
@@ -666,6 +666,20 @@ def apply_bc_theme():
             font-family: 'JetBrains Mono', monospace;
             font-size: 13px;
             color: var(--text-3);
+        }
+
+        /* ===== STICKY ACTION BAR (st._bottom) ===== */
+        /* Style the bottom container to match Nordic Precision theme */
+        [data-testid="stBottom"] {
+            background: rgba(11, 22, 33, 0.92) !important;
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border-top: 1px solid var(--glass-border);
+            box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.3);
+        }
+        [data-testid="stBottomBlockContainer"] {
+            padding-top: 12px !important;
+            padding-bottom: 12px !important;
         }
     </style>
     """, unsafe_allow_html=True)

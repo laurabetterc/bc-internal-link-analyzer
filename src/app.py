@@ -374,6 +374,29 @@ def render_upload():
                 f"{len(st.session_state.full_url_list):,} URLs loaded",
             )
 
+    # Determine if ready to proceed
+    files_ready = st.session_state.sf_data is not None and st.session_state.priority_data is not None
+    ai_health = st.session_state.get("ai_health")
+    ai_ok = ai_health and ai_health.get("ok", False)
+    can_proceed = files_ready and ai_ok
+
+    # Sticky bottom bar — always visible, disabled until ready
+    with st._bottom:
+        if not files_ready:
+            hint = "Upload Screaming Frog export and Priority URLs to continue"
+        elif not ai_ok:
+            hint = "Connect the Gemini API to continue"
+        else:
+            hint = None
+        if hint:
+            st.markdown(
+                f"<p style='color:#64748B;font-size:12px;text-align:center;margin:0 0 6px 0;'>{hint}</p>",
+                unsafe_allow_html=True,
+            )
+        if st.button("Next →", use_container_width=True, disabled=not can_proceed):
+            st.session_state.wizard_step = "step1"
+            st.rerun()
+
     # Cross-check priority URLs against crawl data
     if st.session_state.sf_data is not None and st.session_state.priority_data is not None:
         sf_df = st.session_state.sf_data
@@ -426,9 +449,6 @@ def render_upload():
                         unsafe_allow_html=True,
                     )
 
-        ai_health = st.session_state.get("ai_health")
-        ai_ok = ai_health and ai_health.get("ok", False)
-
         if not ai_ok:
             st.markdown(
                 "<div style='background:rgba(248,113,113,0.1);border:1px solid #F87171;"
@@ -440,10 +460,6 @@ def render_upload():
                 "and click Connect before continuing.</p></div>",
                 unsafe_allow_html=True,
             )
-
-        if st.button("Next →", use_container_width=True, disabled=not ai_ok):
-            st.session_state.wizard_step = "step1"
-            st.rerun()
 
 
 def render_cleaning_step1():
@@ -503,14 +519,19 @@ def render_cleaning_step1():
         f"removing <strong>{remove_count:,}</strong> non-content links"
     )
 
-    if st.button("← Back to Upload", key="step1_back", type="tertiary"):
-        st.session_state.wizard_step = "upload"
-        st.rerun()
-    if st.button("Apply & Next →", use_container_width=True):
-        filtered = filter_by_positions(df, keep_positions)
-        st.session_state.position_filtered_data = filtered
-        st.session_state.wizard_step = "step2"
-        st.rerun()
+    # Sticky bottom action bar
+    with st._bottom:
+        bar_cols = st.columns([1, 3])
+        with bar_cols[0]:
+            if st.button("← Back to Upload", key="step1_back", type="tertiary"):
+                st.session_state.wizard_step = "upload"
+                st.rerun()
+        with bar_cols[1]:
+            if st.button("Apply & Next →", key="step1_next", use_container_width=True):
+                filtered = filter_by_positions(df, keep_positions)
+                st.session_state.position_filtered_data = filtered
+                st.session_state.wizard_step = "step2"
+                st.rerun()
 
 
 def render_cleaning_step2():
@@ -621,14 +642,20 @@ def render_cleaning_step2():
 
     if patterns_df.empty:
         st.info("No recurring URL patterns detected. All links will be included.")
-        if st.button("Run Analysis", use_container_width=True):
-            cleaned = df
-            # Apply template link filter even if no URL patterns
-            if st.session_state.get("remove_template_links", False) and template["total_paths"] > 0:
-                tpl_paths = [tp["path"] for tp in template["paths"]]
-                cleaned = filter_template_links(cleaned, tpl_paths)
-            st.session_state.cleaned_data = cleaned
-            _start_analysis()
+        with st._bottom:
+            bar_cols = st.columns([1, 3])
+            with bar_cols[0]:
+                if st.button("← Back to Clean Links", key="step2_empty_back", type="tertiary"):
+                    st.session_state.wizard_step = "step1"
+                    st.rerun()
+            with bar_cols[1]:
+                if st.button("Run Analysis →", key="step2_empty_next", use_container_width=True):
+                    cleaned = df
+                    if st.session_state.get("remove_template_links", False) and template["total_paths"] > 0:
+                        tpl_paths = [tp["path"] for tp in template["paths"]]
+                        cleaned = filter_template_links(cleaned, tpl_paths)
+                    st.session_state.cleaned_data = cleaned
+                    _start_analysis()
         return
 
     # Pattern toggles — check = exclude
@@ -853,28 +880,33 @@ def render_cleaning_step2():
     exclude_link_count = patterns_df[patterns_df["Pattern"].isin(exclude_patterns)]["Links"].sum()
     pagination_links = pagination["link_count"] if st.session_state.get("remove_pagination", False) and pagination["count"] > 0 else 0
 
-    if st.button("← Back to Clean Links", key="step2_back", type="tertiary"):
-        st.session_state.wizard_step = "step1"
-        st.rerun()
-    if st.button("Run Analysis →", use_container_width=True):
-            cleaned = df
-            # Apply template link filter (removes individual link rows by Link Path)
-            if st.session_state.get("remove_template_links", False) and template["total_paths"] > 0:
-                tpl_paths = [tp["path"] for tp in template["paths"]]
-                cleaned = filter_template_links(cleaned, tpl_paths)
-            # Apply URL pattern filter (removes all links involving matched URLs)
-            cleaned = filter_by_patterns(cleaned, exclude_patterns)
-            # Apply pagination filter
-            if st.session_state.get("remove_pagination", False) and pagination["count"] > 0:
-                cleaned = filter_pagination(cleaned, pagination["urls"])
-            # Apply manual URL exclusions (remove links involving these URLs)
-            if st.session_state.manual_excluded_urls:
-                manual_set = st.session_state.manual_excluded_urls
-                mask = cleaned["Source"].isin(manual_set) | cleaned["Destination"].isin(manual_set)
-                cleaned = cleaned[~mask].copy()
-            st.session_state.cleaned_data = cleaned
-            st.session_state.exclude_patterns = exclude_patterns
-            _start_analysis()
+    # Sticky bottom action bar
+    with st._bottom:
+        bar_cols = st.columns([1, 3])
+        with bar_cols[0]:
+            if st.button("← Back to Clean Links", key="step2_back", type="tertiary"):
+                st.session_state.wizard_step = "step1"
+                st.rerun()
+        with bar_cols[1]:
+            if st.button("Run Analysis →", key="step2_next", use_container_width=True):
+                cleaned = df
+                # Apply template link filter (removes individual link rows by Link Path)
+                if st.session_state.get("remove_template_links", False) and template["total_paths"] > 0:
+                    tpl_paths = [tp["path"] for tp in template["paths"]]
+                    cleaned = filter_template_links(cleaned, tpl_paths)
+                # Apply URL pattern filter (removes all links involving matched URLs)
+                cleaned = filter_by_patterns(cleaned, exclude_patterns)
+                # Apply pagination filter
+                if st.session_state.get("remove_pagination", False) and pagination["count"] > 0:
+                    cleaned = filter_pagination(cleaned, pagination["urls"])
+                # Apply manual URL exclusions (remove links involving these URLs)
+                if st.session_state.manual_excluded_urls:
+                    manual_set = st.session_state.manual_excluded_urls
+                    mask = cleaned["Source"].isin(manual_set) | cleaned["Destination"].isin(manual_set)
+                    cleaned = cleaned[~mask].copy()
+                st.session_state.cleaned_data = cleaned
+                st.session_state.exclude_patterns = exclude_patterns
+                _start_analysis()
 
 
 def _start_analysis():

@@ -195,15 +195,17 @@ def prepare_page_contexts(
             linked_to_interesting.update(outbound.loc[url, "outbound_targets"][:5])
 
     all_interesting = interesting | linked_to_interesting
-    # Cap at 300 to keep costs reasonable
-    if len(all_interesting) > 300:
-        # Prioritize: priority URLs first, then top PR, then orphans, then true orphans, then linked
+    # Cap at 500 to keep costs reasonable while covering more orphans
+    max_pages = 500
+    if len(all_interesting) > max_pages:
+        # Prioritize: priority URLs first, then orphans + true orphans (they need links most),
+        # then top PR pages, then linked neighbors
         ordered = list(priority_urls)
-        ordered.extend(url for url in top_pr_urls if url not in priority_urls)
         ordered.extend(url for url in orphan_urls if url not in set(ordered))
         ordered.extend(url for url in true_orphans if url not in set(ordered))
+        ordered.extend(url for url in top_pr_urls if url not in set(ordered))
         ordered.extend(url for url in linked_to_interesting if url not in set(ordered))
-        all_interesting = set(ordered[:300])
+        all_interesting = set(ordered[:max_pages])
 
     # Build priority lookup
     priority_lookup = {}
@@ -380,6 +382,37 @@ Respond with a JSON object with this exact structure:
     return list(merged.values()), batch_errors
 
 
+def _normalize_url(url: str) -> str:
+    """Normalize a URL: strip trailing slashes (except root /)."""
+    url = url.strip()
+    if url.endswith("/") and url.count("/") > 3:
+        url = url.rstrip("/")
+    return url
+
+
+def _find_closest_url(url: str, known_urls: set[str]) -> str | None:
+    """Try to find a matching URL in the known set, tolerating minor AI errors.
+
+    Checks: exact match, trailing slash variants, and substring match on the last path segment.
+    """
+    norm = _normalize_url(url)
+    if norm in known_urls:
+        return norm
+    # Try with/without trailing slash
+    if norm + "/" in known_urls:
+        return norm + "/"
+    # Try substring match on the last path segment (catches missing path prefixes)
+    try:
+        last_segment = urlparse(norm).path.rstrip("/").rsplit("/", 1)[-1]
+        if last_segment and len(last_segment) > 10:
+            matches = [u for u in known_urls if last_segment in u]
+            if len(matches) == 1:
+                return matches[0]
+    except Exception:
+        pass
+    return None
+
+
 def find_link_opportunities(
     contexts: list[dict],
     cocoons: list[dict],
@@ -412,6 +445,10 @@ def find_link_opportunities(
     existing_links = set(
         zip(cleaned_df["Source"].tolist(), cleaned_df["Destination"].tolist())
     )
+
+    # Build known URL set for validation (all URLs from crawl + contexts)
+    known_urls = set(cleaned_df["Source"].unique()) | set(cleaned_df["Destination"].unique())
+    known_urls.update(ctx["url"] for ctx in contexts)
 
     # Split contexts into batches
     batches = _batch_pages(contexts)
@@ -479,11 +516,12 @@ Rules for recommendations:
 2. **Orphan pages need links**: Pages with 0 inbound links need at least one link
 3. **True orphan pages are critical**: Pages marked TRUE ORPHAN have zero links — no page links to them AND they link to no page. They MUST receive at least one link from a semantically relevant page
 4. **Cocoon strengthening**: Pages within the same operator cocoon should link to each other. The code page should receive links from all sibling pages in the cocoon
-5. **PageRank strategy**: High-PageRank pages should link to important pages that need a boost
-5. **Semantic relevance**: Only recommend links between pages that are topically related
-6. **Anchor text**: Suggest natural, keyword-rich anchor text for each link. Use the target page's keyword when available. Avoid generic anchors like "click here"
-7. **Don't recommend links that already exist** — I've already filtered those
-8. **IMPORTANT**: Use the FULL URLs exactly as provided (starting with https://), not just paths
+5. **NO cross-operator links**: NEVER recommend a link FROM an operator-specific page TO a different operator's page. For example, a Betano page must NOT link to a Bet365 page. If an orphan page from operator X needs a link but no other operator X pages exist, use a generic hub/category page as the source instead (e.g., a "best betting sites" comparator or a category listing page)
+6. **PageRank strategy**: High-PageRank pages should link to important pages that need a boost
+7. **Semantic relevance**: Only recommend links between pages that are topically related
+8. **Anchor text**: Suggest natural, keyword-rich anchor text for each link. Use the target page's keyword when available. Avoid generic anchors like "click here"
+9. **Don't recommend links that already exist** — I've already filtered those
+10. **IMPORTANT**: Use the FULL URLs exactly as provided (starting with https://), not just paths. Do NOT modify, truncate, or invent URLs
 
 For each recommendation, rate priority:
 - **high**: Priority page with critical/low link count, or orphan page, or missing cocoon code page link
@@ -510,11 +548,23 @@ Find as many relevant opportunities as you can (aim for 5-15 per batch). Quality
                 text = _call_gemini(client, prompt)
                 result = json.loads(text)
                 recs = result.get("recommendations", [])
-                # Filter out recommendations for links that already exist
                 for rec in recs:
-                    pair = (rec.get("source_url", ""), rec.get("target_url", ""))
-                    if pair not in existing_links:
-                        all_recommendations.append(rec)
+                    # Normalize URLs (strip trailing slashes)
+                    src = _normalize_url(rec.get("source_url", ""))
+                    tgt = _normalize_url(rec.get("target_url", ""))
+                    # Validate URLs exist in known set; try to fix if not
+                    src_valid = _find_closest_url(src, known_urls)
+                    tgt_valid = _find_closest_url(tgt, known_urls)
+                    if not src_valid or not tgt_valid:
+                        continue  # Drop recommendations with unknown URLs
+                    rec["source_url"] = src_valid
+                    rec["target_url"] = tgt_valid
+                    # Filter out self-links and already-existing links
+                    if src_valid == tgt_valid:
+                        continue
+                    if (src_valid, tgt_valid) in existing_links:
+                        continue
+                    all_recommendations.append(rec)
                 break
             except Exception as e:
                 if attempt == 0:
