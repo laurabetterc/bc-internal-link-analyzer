@@ -80,15 +80,14 @@ def check_api_health() -> dict:
 
     try:
         client = genai.Client(api_key=_config.GEMINI_API_KEY)
-        # Gemini 3.x Pro Preview models REQUIRE thinking mode (reject thinking_budget=0).
-        # Skip the budget hint for those — let the model use its default thinking allowance.
+        # Never pass thinking_budget here — 3.x Pro Preview rejects budget=0 outright,
+        # and the default thinking allowance works fine for a one-word health check
+        # on every Gemini generation.
         cfg = {
             "max_output_tokens": 4096,
             "temperature": 0,
             "response_mime_type": "application/json",
         }
-        if "3." not in _config.GEMINI_MODEL and "pro" not in _config.GEMINI_MODEL.lower():
-            cfg["thinking_config"] = {"thinking_budget": 0}
         response = client.models.generate_content(
             model=_config.GEMINI_MODEL,
             contents="Reply with exactly: {\"status\": \"ok\"}",
