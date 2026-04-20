@@ -34,7 +34,7 @@ from src.config import APP_PASSWORD, GEMINI_API_KEY, HEALTH_CRITICAL_MAX, HEALTH
 from src.parsers.screaming_frog import parse_screaming_frog_csv
 from src.parsers.priority_urls import parse_priority_urls_csv
 from src.cleaning.link_position import get_position_summary, filter_by_positions
-from src.cleaning.url_patterns import detect_url_patterns, filter_by_patterns, detect_pagination_urls, filter_pagination
+from src.cleaning.url_patterns import detect_url_patterns, filter_by_patterns, detect_pagination_urls, filter_pagination, detect_template_links, filter_template_links
 from src.analysis.link_audit import compute_link_audit, get_priority_urls_health
 from src.analysis.pagerank import compute_pagerank, get_top_pages, get_pagerank_distribution
 from src.analysis.ai_analyzer import run_ai_analysis, get_token_usage, check_api_health
@@ -98,6 +98,7 @@ def reset_analysis():
         "sf_data", "priority_data", "full_url_list", "cleaned_data", "position_filtered_data",
         "url_patterns", "position_keep", "pattern_exclude", "exclude_patterns",
         "custom_patterns", "pagination_info", "remove_pagination", "manual_excluded_urls",
+        "template_links_info", "template_exclude",
         "audit_results", "pagerank_scores", "ai_results", "cocoon_health_data", "token_usage",
         "ai_health", "market_resolved", "market_detection",
     ]:
@@ -505,6 +506,25 @@ def render_cleaning_step1():
         f"removing <strong>{remove_count:,}</strong> non-content links"
     )
 
+    # Block Step 2 if Link Path column is missing — template-link detection needs it
+    link_path_missing = "Link Path" not in df.columns
+    if link_path_missing:
+        st.markdown(
+            "<div style='background:rgba(248,113,113,0.12);border:1px solid rgba(248,113,113,0.4);"
+            "border-radius:8px;padding:12px 16px;margin-top:16px;'>"
+            "<p style='color:#F87171;font-size:14px;font-weight:600;margin:0 0 4px 0;'>"
+            "⚠️ Missing <code>Link Path</code> column</p>"
+            "<p style='color:#FECACA;font-size:13px;margin:0 0 4px 0;'>"
+            "Your Screaming Frog export doesn't include the <code>Link Path</code> (XPath) column. "
+            "Without it, we can't detect template links misclassified as <code>Content</code> — a key "
+            "cleaning step for sites with non-semantic HTML.</p>"
+            "<p style='color:#FECACA;font-size:13px;margin:0;'>"
+            "<strong>Fix:</strong> In Screaming Frog → Configuration → Spider → Extraction → "
+            "enable <strong>Store HTML</strong> and <strong>Link Paths</strong>, then re-crawl and re-export.</p>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
     # Sticky bottom action bar
     with st._bottom:
         bar_cols = st.columns([1, 3])
@@ -513,11 +533,19 @@ def render_cleaning_step1():
                 st.session_state.wizard_step = "upload"
                 st.rerun()
         with bar_cols[1]:
-            if st.button("Apply & Next →", key="step1_next", use_container_width=True):
-                filtered = filter_by_positions(df, keep_positions)
-                st.session_state.position_filtered_data = filtered
-                st.session_state.wizard_step = "step2"
-                st.rerun()
+            if link_path_missing:
+                st.button(
+                    "Apply & Next →  (blocked: Link Path column missing)",
+                    key="step1_next",
+                    use_container_width=True,
+                    disabled=True,
+                )
+            else:
+                if st.button("Apply & Next →", key="step1_next", use_container_width=True):
+                    filtered = filter_by_positions(df, keep_positions)
+                    st.session_state.position_filtered_data = filtered
+                    st.session_state.wizard_step = "step2"
+                    st.rerun()
 
 
 def render_cleaning_step2():
@@ -577,6 +605,61 @@ def render_cleaning_step2():
         )
         st.markdown("<br>", unsafe_allow_html=True)
 
+    # ---- Template link detection (false "Content" links) ----
+    if "template_links_info" not in st.session_state:
+        st.session_state.template_links_info = detect_template_links(df)
+    if "template_exclude" not in st.session_state:
+        st.session_state.template_exclude = {
+            p["path"]: True for p in st.session_state.template_links_info["paths"]
+        }
+
+    template_info = st.session_state.template_links_info
+    if template_info["total_paths"] > 0:
+        st.markdown("#### Template links misclassified as content", unsafe_allow_html=True)
+        st.markdown(
+            f"<p style='color:#94A3B8;font-size:14px;margin-bottom:6px;'>"
+            f"Found <strong style='color:#FFFFFF;'>{template_info['total_paths']}</strong> XPath(s) "
+            f"appearing on a high share of pages — likely nav/sidebar/footer templates that Screaming Frog "
+            f"labeled as <code>Content</code> because the HTML isn't semantic (e.g. <code>&lt;div&gt;</code> "
+            f"instead of <code>&lt;nav&gt;</code>).</p>"
+            f"<p style='color:#94A3B8;font-size:13px;margin-bottom:12px;'>"
+            f"Check = exclude these links from analysis. Uncheck only if the XPath really is editorial content "
+            f"(rare).</p>",
+            unsafe_allow_html=True,
+        )
+
+        for idx, path_info in enumerate(template_info["paths"]):
+            path = path_info["path"]
+            default_exclude = st.session_state.template_exclude.get(path, True)
+            col1, col2, col3 = st.columns([0.5, 4, 1.2])
+            with col1:
+                st.session_state.template_exclude[path] = st.checkbox(
+                    "Exclude",
+                    value=default_exclude,
+                    key=f"tpl_{idx}",
+                    label_visibility="collapsed",
+                )
+            with col2:
+                anchors_preview = ", ".join(f'"{a}"' for a in path_info["anchors"][:3] if a)
+                dest_preview = path_info["destinations"][0] if path_info["destinations"] else ""
+                st.markdown(
+                    f"<div style='font-family:JetBrains Mono,monospace;font-size:12px;color:#F0F4F8;"
+                    f"word-break:break-all;'>{path}</div>"
+                    f"<div style='font-size:12px;color:#64748B;margin-top:2px;'>"
+                    f"Top anchors: {anchors_preview or '—'}</div>"
+                    f"<div style='font-size:12px;color:#64748B;'>"
+                    f"Top dest: <span style='font-family:JetBrains Mono,monospace;'>{dest_preview}</span></div>",
+                    unsafe_allow_html=True,
+                )
+            with col3:
+                st.markdown(
+                    f"<span style='color:#94A3B8;font-size:13px;'>"
+                    f"{path_info['page_count']:,} pages ({path_info['page_ratio']*100:.0f}%)<br>"
+                    f"{path_info['link_count']:,} links</span>",
+                    unsafe_allow_html=True,
+                )
+        st.markdown("<br>", unsafe_allow_html=True)
+
     # Detect patterns (cached)
     if "url_patterns" not in st.session_state:
         st.session_state.url_patterns = detect_url_patterns(df)
@@ -593,7 +676,11 @@ def render_cleaning_step2():
                     st.rerun()
             with bar_cols[1]:
                 if st.button("Run Analysis →", key="step2_empty_next", use_container_width=True):
-                    st.session_state.cleaned_data = df
+                    cleaned = df
+                    template_excl = [p for p, excl in st.session_state.get("template_exclude", {}).items() if excl]
+                    if template_excl:
+                        cleaned = filter_template_links(cleaned, template_excl)
+                    st.session_state.cleaned_data = cleaned
                     _start_analysis()
         return
 
@@ -832,6 +919,10 @@ def render_cleaning_step2():
                 # Apply pagination filter
                 if st.session_state.get("remove_pagination", False) and pagination["count"] > 0:
                     cleaned = filter_pagination(cleaned, pagination["urls"])
+                # Apply template link filter (false "Content" links)
+                template_excl = [p for p, excl in st.session_state.get("template_exclude", {}).items() if excl]
+                if template_excl:
+                    cleaned = filter_template_links(cleaned, template_excl)
                 # Apply manual URL exclusions (remove links involving these URLs)
                 if st.session_state.manual_excluded_urls:
                     manual_set = st.session_state.manual_excluded_urls
@@ -1643,7 +1734,6 @@ def render_results():
     # Side-by-side downloads: CSV + HTML report
     from datetime import datetime as _dt
     from src.export.html_report import generate_html_report
-    from src.analysis.link_audit import get_priority_urls_health
     from src.parsers.screaming_frog import get_primary_domain
 
     site_domain = get_primary_domain(cleaned)
