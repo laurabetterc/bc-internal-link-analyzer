@@ -150,6 +150,37 @@ def generate_html_report(
         {_table_html(["", "Operator", "Pages", "Intra-links", "Completeness", "Code Page Links", "Health"], cocoon_rows)}
         """
 
+    # --- Orphan URL list (Laura request — full URL list in the report) ---
+    orphan_section = ""
+    all_orphan_pages = audit.get("all_orphan_pages") or [
+        {"url": u, "in_crawl": True} for u in audit.get("orphan_pages", [])
+    ]
+    if all_orphan_pages:
+        orphan_rows = [
+            [r["url"], "In crawl" if r["in_crawl"] else "Not in crawl"]
+            for r in all_orphan_pages
+        ]
+        not_in_crawl = sum(1 for r in all_orphan_pages if not r["in_crawl"])
+        copy_text = "\\n".join(r["url"] for r in all_orphan_pages).replace("'", "\\'")
+        note = (
+            f"{not_in_crawl:,} of them aren't in the crawl at all — these are the most critical."
+            if not_in_crawl > 0 else ""
+        )
+        orphan_section = f"""
+        <h2 style="margin-top:48px;">Orphan Pages ({len(all_orphan_pages)})</h2>
+        <p class="section-desc">
+            Pages with zero inbound internal links. Every orphan must get at least one inbound link.
+            {note}
+        </p>
+        <button onclick="navigator.clipboard.writeText('{copy_text}')"
+                style="background:linear-gradient(135deg,#005947,#00A868);color:#fff;border:none;
+                       padding:8px 16px;border-radius:8px;font-family:'DM Sans',sans-serif;
+                       font-size:13px;font-weight:600;cursor:pointer;margin-bottom:12px;">
+            Copy all orphan URLs
+        </button>
+        {_table_html(["URL", "Status"], orphan_rows, max_height="400px")}
+        """
+
     # --- AI Recommendations ---
     recs_section = ""
     if recommendations:
@@ -157,15 +188,43 @@ def generate_html_report(
         n_med = sum(1 for r in recommendations if r.get("priority") == "medium")
         n_low = sum(1 for r in recommendations if r.get("priority") == "low")
 
+        # Tag helpers (match the CSV/Excel behavior)
+        orphan_set = {r["url"] for r in all_orphan_pages}
+        priority_set = set(priority_health_df["URL"].tolist()) if priority_health_df is not None else set()
+
+        def _status(u, is_fb):
+            if is_fb:
+                return "Fallback"
+            if u in orphan_set:
+                return "Orphan"
+            if u in priority_set:
+                return "Priority"
+            return "Standard"
+
+        def _tag(r, s):
+            base = r.get("reason", "")
+            if base.startswith("[Orphan target]") or base.startswith("[Priority target]") or base.startswith("[Fallback link]"):
+                return base
+            if s == "Orphan":
+                return f"[Orphan target] {base}".strip()
+            if s == "Priority":
+                return f"[Priority target] {base}".strip()
+            if s == "Fallback":
+                return f"[Fallback link] {base}".strip()
+            return base
+
         priority_icons = {"high": "🔴", "medium": "🟡", "low": "🟢"}
         rec_rows = []
         for rec in recommendations:
+            status = _status(rec.get("target_url", ""), bool(rec.get("is_fallback")))
             rec_rows.append([
                 priority_icons.get(rec.get("priority", ""), ""),
                 rec.get("source_url", ""),
                 rec.get("target_url", ""),
                 rec.get("suggested_anchor", ""),
-                rec.get("reason", ""),
+                status,
+                str(int(rec.get("relevance_score", 0))),
+                _tag(rec, status),
             ])
 
         recs_section = f"""
@@ -176,7 +235,7 @@ def generate_html_report(
             <span style="color:#F87171;font-weight:600;">{n_high} high</span>,
             <span style="color:#FBBF24;font-weight:600;">{n_med} medium</span>,
             <span style="color:#34D399;font-weight:600;">{n_low} low</span> priority.</p>
-        {_table_html(["", "Source URL", "Target URL", "Suggested Anchor", "Reason"], rec_rows, max_height="600px")}
+        {_table_html(["", "Source URL", "Target URL", "Anchor", "Target", "Score", "Reason"], rec_rows, max_height="600px")}
         """
 
     # --- Token usage ---
@@ -196,11 +255,8 @@ def generate_html_report(
             Total: {token_usage["total_tokens"]:,} tokens. Estimated cost: ~${cost:.4f}</p>
         """
 
-    # --- True orphan stat card ---
-    true_orphan_count = audit.get("true_orphan_count", 0)
-    true_orphan_card = ""
-    if true_orphan_count > 0:
-        true_orphan_card = _stat_card_html(f"{true_orphan_count:,}", "True Orphans", danger=True)
+    # Merged orphan count (in-crawl + true orphans)
+    all_orphan_count = audit.get("all_orphan_count", audit.get("orphan_count", 0))
 
     # --- Assemble HTML ---
     html = f"""<!DOCTYPE html>
@@ -288,9 +344,8 @@ def generate_html_report(
         <div class="stats-grid">
             {_stat_card_html(f'{audit["total_pages"]:,}', "Total Pages")}
             {_stat_card_html(f'{audit["total_links"]:,}', "Internal Links")}
-            {_stat_card_html(f'{audit["orphan_count"]:,}', "Orphan Pages", danger=audit["orphan_count"] > 0)}
+            {_stat_card_html(f'{all_orphan_count:,}', "Orphan Pages", danger=all_orphan_count > 0)}
             {_stat_card_html(str(audit["inbound_avg"]), "Avg Inbound Links", accent=True)}
-            {true_orphan_card}
         </div>
 
         <div style="background:rgba(15,29,43,0.7);border:1px solid rgba(37,64,85,0.6);border-radius:12px;padding:20px;margin-bottom:24px;">
@@ -311,6 +366,9 @@ def generate_html_report(
                 </div>
             </div>
         </div>
+
+        <!-- Orphan Pages list -->
+        {orphan_section}
 
         <!-- PageRank Distribution -->
         <h2 style="margin-top:48px;">PageRank Distribution</h2>

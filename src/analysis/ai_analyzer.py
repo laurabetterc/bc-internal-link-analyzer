@@ -14,6 +14,24 @@ from google import genai
 from google.genai import errors as genai_errors
 
 import src.config as _config
+from src.analysis.relevance_scorer import score_pair
+from src.analysis.event_detection import is_past_event
+
+
+# --------------------------------------------------------------------------- #
+# Security — redact API keys from any user-facing string (errors, logs, UI).
+# --------------------------------------------------------------------------- #
+import re as _re
+
+# Gemini keys start with "AIza" followed by 35 URL-safe chars (39 total).
+_API_KEY_PATTERN = _re.compile(r"AIza[0-9A-Za-z_\-]{35}")
+
+
+def _redact(text: str) -> str:
+    """Remove any API key from a string before showing it to the user or logging it."""
+    if not text:
+        return text
+    return _API_KEY_PATTERN.sub("[REDACTED_API_KEY]", str(text))
 
 
 # Token usage tracker — accumulates across all API calls in one analysis
@@ -62,15 +80,19 @@ def check_api_health() -> dict:
 
     try:
         client = genai.Client(api_key=_config.GEMINI_API_KEY)
+        # Gemini 3.x Pro Preview models REQUIRE thinking mode (reject thinking_budget=0).
+        # Skip the budget hint for those — let the model use its default thinking allowance.
+        cfg = {
+            "max_output_tokens": 4096,
+            "temperature": 0,
+            "response_mime_type": "application/json",
+        }
+        if "3." not in _config.GEMINI_MODEL and "pro" not in _config.GEMINI_MODEL.lower():
+            cfg["thinking_config"] = {"thinking_budget": 0}
         response = client.models.generate_content(
             model=_config.GEMINI_MODEL,
             contents="Reply with exactly: {\"status\": \"ok\"}",
-            config={
-                "max_output_tokens": 256,
-                "temperature": 0,
-                "response_mime_type": "application/json",
-                "thinking_config": {"thinking_budget": 0},
-            },
+            config=cfg,
         )
         # If we got a response, the API works
         if response.text:
@@ -86,11 +108,12 @@ def check_api_health() -> dict:
         detail_str = f" ({', '.join(details)})" if details else ""
         return {"ok": False, "error": f"API returned empty response{detail_str}"}
     except genai_errors.ClientError as e:
-        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+        msg = _redact(str(e))
+        if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
             return {"ok": False, "error": "Rate limit exceeded — free tier (20 req/day) may be exhausted. Try again later."}
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": msg}
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": _redact(str(e))}
 
 
 def _url_slug(url: str) -> str:
@@ -101,11 +124,13 @@ def _url_slug(url: str) -> str:
         return url
 
 
-def _call_gemini(client: genai.Client, prompt: str, max_tokens: int = 16384, max_retries: int = 3) -> str:
+def _call_gemini(client: genai.Client, prompt: str, max_tokens: int | None = None, max_retries: int = 3) -> str:
     """Call Gemini and return the text response. Tracks token usage.
 
     Handles rate limits (429) with exponential backoff.
     """
+    if max_tokens is None:
+        max_tokens = _config.GEMINI_MAX_OUTPUT_TOKENS
     global _token_usage
 
     for attempt in range(max_retries):
@@ -316,22 +341,33 @@ def detect_cocoons(
 
         prompt = f"""You are an SEO analyst. I have a list of URLs from a sports betting / casino affiliate website.
 
-Your task: detect "cocoons" — groups of pages that belong to the same betting operator (e.g., bet365, 1xbet, Betano, Caliente, etc.).
+Your task: detect "cocoons" — groups of pages that belong to the same betting operator (e.g., bet365, 1xbet, Betano, Caliente, etc.) — AND classify each page by type.
 
 A cocoon typically contains:
-- A **code page** (promo code / bonus page) — this is the main target page
+- A **code page** (promo code / bonus page) — main conversion target
 - A **review page** for the operator
-- An **app page** (mobile app review)
-- **Guide pages** related to the operator
-- Other pages mentioning the operator
+- An **app page**, **streaming page**, **payment page**, **bonus page**, etc.
+- Other operator-specific feature pages
 
 Rules:
-1. Group pages by operator based on URL paths and keywords
-2. For each cocoon, identify the **code page** (usually contains "codigo", "code", "bonus", "promo" in the path)
-3. Only create a cocoon if you find at least 2 pages for an operator
-4. Pages that don't belong to any operator cocoon should be ignored
-5. A page can only belong to ONE cocoon
-6. IMPORTANT: Return the FULL URLs exactly as provided (starting with https://), not just the paths
+1. Group pages by operator based on URL paths and keywords.
+2. Identify the **code page** for each cocoon (URL usually contains "codigo", "code", "bonus", "promo").
+3. Only create a cocoon if you find at least 2 pages for an operator.
+4. Pages that don't belong to any operator cocoon should be ignored.
+5. **Multi-operator pages** — when a page mentions/compares MULTIPLE operators (e.g. "bet365 vs betano", "best betting sites", "top 10 betting apps", cross-brand guides, news mentioning several operators), put that page in EVERY cocoon it belongs to (same URL appears in multiple cocoons).
+6. **Page types** — classify every page using ONE of these canonical types when it fits, OR a short custom type label (e.g. "esports", "horse-racing-tips") if none fits:
+
+   Canonical types (use these when applicable):
+   - Sports betting: review, code, bonus, app, streaming, payment, cashout, odds, sport-specific, customer-service, registration, comparator
+   - Casino: casino-review, slots, live-casino, table-games, jackpots, casino-bonus
+   - Poker: poker-review, cash-games, tournaments, freerolls
+   - Other verticals: esports, virtual-sports, horse-racing, lottery, bingo, fantasy
+   - Cross-cutting: vip-program, responsible-gambling, license-info, region-specific
+   - Editorial/topic: topic-evergreen, topic-event-timely, topic-news, topic-tips-predictions
+
+   "comparator" is the page type for multi-operator comparison pages.
+
+7. IMPORTANT: Return the FULL URLs exactly as provided (starting with https://), not just paths.
 
 Here are the URLs:
 
@@ -343,7 +379,10 @@ Respond with a JSON object with this exact structure:
     {{
       "operator": "operator name",
       "code_page": "full URL of the code page (or null if none found)",
-      "pages": ["full URL 1", "full URL 2"]
+      "pages": [
+        {{"url": "full URL 1", "page_type": "review"}},
+        {{"url": "full URL 2", "page_type": "code"}}
+      ]
     }}
   ]
 }}"""
@@ -359,27 +398,56 @@ Respond with a JSON object with this exact structure:
                 if attempt == 0:
                     time.sleep(3)
                     continue
-                batch_errors.append(f"Cocoon batch {batch_idx+1}: {e}")
+                batch_errors.append(f"Cocoon batch {batch_idx+1}: {_redact(str(e))}")
                 break
 
-    # Merge cocoons for the same operator across batches
+    # Merge cocoons for the same operator across batches.
+    # Pages may come as plain URL strings (legacy) OR as {url, page_type} dicts (new format).
+    # Normalize to a {url: page_type} mapping per cocoon, then derive `pages` (URL list) for backward compat.
     merged = {}
     for cocoon in all_cocoons:
         op = cocoon.get("operator", "").lower().strip()
+        if not op:
+            continue
         if op not in merged:
             merged[op] = {
                 "operator": cocoon.get("operator", ""),
                 "code_page": cocoon.get("code_page"),
-                "pages": list(cocoon.get("pages", [])),
+                "page_types": {},
             }
-        else:
-            # Merge pages, prefer code_page if found
-            merged[op]["pages"].extend(cocoon.get("pages", []))
-            merged[op]["pages"] = list(set(merged[op]["pages"]))
-            if not merged[op]["code_page"] and cocoon.get("code_page"):
-                merged[op]["code_page"] = cocoon["code_page"]
 
-    return list(merged.values()), batch_errors
+        for page in cocoon.get("pages", []):
+            if isinstance(page, dict):
+                url = page.get("url")
+                ptype = page.get("page_type")
+            else:
+                url = page
+                ptype = None
+            if not url:
+                continue
+            # Keep first non-empty page_type seen for a URL within an operator
+            if url not in merged[op]["page_types"] or (ptype and not merged[op]["page_types"][url]):
+                merged[op]["page_types"][url] = ptype
+
+        if not merged[op]["code_page"] and cocoon.get("code_page"):
+            merged[op]["code_page"] = cocoon["code_page"]
+
+    # Backfill the `pages` URL list and surface multi-operator URLs for downstream rules.
+    cocoons_out = []
+    url_to_operators: dict[str, list[str]] = {}
+    for op_key, c in merged.items():
+        c["pages"] = list(c["page_types"].keys())
+        cocoons_out.append(c)
+        for url in c["pages"]:
+            url_to_operators.setdefault(url, []).append(c["operator"])
+
+    multi_operator_urls = {url: ops for url, ops in url_to_operators.items() if len(ops) > 1}
+
+    # Stash on the first cocoon as a side channel — keep return signature unchanged.
+    if cocoons_out:
+        cocoons_out[0]["_multi_operator_urls"] = multi_operator_urls
+
+    return cocoons_out, batch_errors
 
 
 def _normalize_url(url: str) -> str:
@@ -433,13 +501,37 @@ def find_link_opportunities(
         ...
     ]
     """
-    # Build cocoon lookup for context
-    cocoon_info = {}
+    # Build cocoon lookup for context.
+    # Multi-operator URLs (comparators, vs pages, cross-brand guides) belong to several cocoons.
+    cocoon_info: dict[str, list[dict]] = {}
+    page_type_lookup: dict[str, str] = {}
     for cocoon in cocoons:
         op = cocoon["operator"]
         code_page = cocoon.get("code_page")
+        page_types = cocoon.get("page_types", {})
         for page_url in cocoon.get("pages", []):
-            cocoon_info[page_url] = {"operator": op, "code_page": code_page}
+            cocoon_info.setdefault(page_url, []).append({"operator": op, "code_page": code_page})
+            ptype = page_types.get(page_url)
+            if ptype and page_url not in page_type_lookup:
+                page_type_lookup[page_url] = ptype
+
+    multi_operator_urls = (cocoons[0].get("_multi_operator_urls", {}) if cocoons else {})
+
+    # Per-URL fast lookups for the relevance scorer
+    operators_for_url: dict[str, list[str]] = {
+        url: [ci["operator"] for ci in cis] for url, cis in cocoon_info.items()
+    }
+    code_page_by_url: dict[str, str | None] = {}
+    review_page_by_op: dict[str, str | None] = {}
+    for cocoon in cocoons:
+        op = cocoon["operator"]
+        code = cocoon.get("code_page")
+        for page_url in cocoon.get("pages", []):
+            if page_url not in code_page_by_url:
+                code_page_by_url[page_url] = code
+            if cocoon.get("page_types", {}).get(page_url) == "review":
+                review_page_by_op[op] = page_url
+    ctx_by_url = {ctx["url"]: ctx for ctx in contexts}
 
     # Build existing links set for quick lookup
     existing_links = set(
@@ -478,13 +570,23 @@ def find_link_opportunities(
                 anchors = ", ".join(ctx["inbound_anchors"][:5])
                 desc += f"  Current inbound anchors: {anchors}\n"
 
-            # Cocoon info
+            # Page type (canonical or custom)
+            ptype = page_type_lookup.get(ctx["url"])
+            if ptype:
+                desc += f"  Page type: {ptype}\n"
+
+            # Cocoon info — a URL may belong to several operators (multi-operator pages)
             if ctx["url"] in cocoon_info:
-                ci = cocoon_info[ctx["url"]]
-                desc += f"  Cocoon: {ci['operator']}"
-                if ci["code_page"] == ctx["url"]:
-                    desc += " (THIS IS THE CODE PAGE)"
-                desc += "\n"
+                cis = cocoon_info[ctx["url"]]
+                if len(cis) > 1:
+                    ops = ", ".join(ci["operator"] for ci in cis)
+                    desc += f"  ** MULTI-OPERATOR PAGE — belongs to cocoons: {ops} ** (allowed to link to each operator)\n"
+                else:
+                    ci = cis[0]
+                    desc += f"  Cocoon: {ci['operator']}"
+                    if ci["code_page"] == ctx["url"]:
+                        desc += " (THIS IS THE CODE PAGE)"
+                    desc += "\n"
 
             page_descriptions.append(desc)
 
@@ -501,7 +603,7 @@ def find_link_opportunities(
                 )
             cocoon_summary = "Known operator cocoons:\n" + "\n".join(cocoon_lines)
 
-        prompt = f"""You are an SEO expert specializing in internal linking strategy for sports betting affiliate sites.
+        prompt = f"""You are an SEO expert specializing in internal linking strategy for sports betting / casino affiliate sites.
 
 I'll give you a batch of pages from a site. Your job is to find **internal linking opportunities** — pages that SHOULD link to each other but currently don't.
 
@@ -512,20 +614,48 @@ Pages in this batch:
 {pages_text}
 
 Rules for recommendations:
-1. **Priority pages need more links**: Pages marked PRIORITY that have few inbound links need new links pointing to them
-2. **Orphan pages need links**: Pages with 0 inbound links need at least one link
-3. **True orphan pages are critical**: Pages marked TRUE ORPHAN have zero links — no page links to them AND they link to no page. They MUST receive at least one link from a semantically relevant page
-4. **Cocoon strengthening**: Pages within the same operator cocoon should link to each other. The code page should receive links from all sibling pages in the cocoon
-5. **NO cross-operator links**: NEVER recommend a link FROM an operator-specific page TO a different operator's page. For example, a Betano page must NOT link to a Bet365 page. If an orphan page from operator X needs a link but no other operator X pages exist, use a generic hub/category page as the source instead (e.g., a "best betting sites" comparator or a category listing page)
-6. **PageRank strategy**: High-PageRank pages should link to important pages that need a boost
-7. **Semantic relevance**: Only recommend links between pages that are topically related
-8. **Anchor text**: Suggest natural, keyword-rich anchor text for each link. Use the target page's keyword when available. Avoid generic anchors like "click here"
-9. **Don't recommend links that already exist** — I've already filtered those
-10. **IMPORTANT**: Use the FULL URLs exactly as provided (starting with https://), not just paths. Do NOT modify, truncate, or invent URLs
+
+1. **Priority pages need more links**: Pages marked PRIORITY with few inbound links need new links pointing to them.
+
+2. **Orphan rule (ABSOLUTE)**: Every page marked ORPHAN or TRUE ORPHAN MUST receive at least one inbound link in your recommendations. Do not skip orphan pages. An orphan page with zero inbound links gets no PageRank and is invisible — fixing this is the #1 SEO priority.
+
+3. **Cocoon PR flow — funnel, not star**: The code page is the PageRank destination of an operator cocoon and should receive more inbound links than any other page in the silo. BUT siblings link to the code page ONLY when semantically relevant. Do NOT mechanically link every sibling to the code page. The correct pattern is a FUNNEL: content pages link to the review, the review funnels to the code page. Relevance beats mechanical linking.
+
+4. **Multi-operator pages are allowed to link to multiple operators**:
+   - Single-operator pages (e.g. "bet365 review", "betano bonus") must NEVER link to another operator's pages.
+   - BUT comparator pages ("bet365 vs betano", "best betting sites", "top 10 betting apps"), cross-brand guides, and news articles that mention multiple operators belong to MULTIPLE cocoons simultaneously and SHOULD link to each relevant operator's appropriate page.
+
+5. **Comparator topic → target page type matching** (Rule 11 in spec):
+   When a comparator/multi-operator page links to an operator cocoon, match the comparator's topic to the right page type in that cocoon:
+   - "Best betting sites" / listicles / "top 10" → operator's **review** or **code** page (PR-driven)
+   - "vs" pages (e.g. bet365 vs betano) → operator's highest-PR sibling (usually **review**)
+   - "Best betting app" / "best mobile" → operator's **app** page
+   - "Best payment method" / "best crypto betting" / "best PIX" → operator's **payment method** page
+   - "Best bonuses" / "welcome bonus" / "free bets" → operator's **code/bonus** page
+   - "Best live betting" / "streaming" / "cashout" / "odds" → operator's matching feature page
+   - "Safest" / "licensed" / "newest" / "no KYC" → operator's **review** page (trust signal)
+   - "Best for [sport]" → operator's **sport-specific** page if it exists, else review
+   - News/timely articles mentioning operators → operator's **review** page (never code page — informational content shouldn't force-funnel to conversion)
+   - FALLBACK: when the comparator's topic doesn't match any page type in an operator's cocoon, link to the operator's **review** page.
+
+6. **PageRank strategy**: High-PageRank pages should link to important pages that need a boost. When multiple valid sources exist for a target, prefer the source with the highest PageRank.
+
+7. **Semantic relevance**: Only recommend links between pages that are topically related. Inside a cocoon, prefer pages in the same cluster (bonus cluster: code+bonus+registration; mobile cluster: app+streaming; money cluster: payment+cashout; betting cluster: odds+sport; trust cluster: review+customer-service).
+
+8. **Anchor text with diversity**: Suggest natural anchors. Across multiple inbound links to the same target page, vary the anchor style with this target mix:
+   - ~30% **branded** (e.g. "bet365", "bet365 sportsbook")
+   - ~30% **partial-match** (e.g. "bet365 review", "bet365 rating")
+   - ~20% **generic** (e.g. "read our review", "this operator", "see more")
+   - ~20% **long-tail** (e.g. "our full bet365 review covering bonuses and odds")
+   Never use "click here". Avoid over-optimization — do NOT use the same keyword-stuffed anchor from every source.
+
+9. **Don't recommend links that already exist** — I've already filtered those.
+
+10. **Use FULL URLs exactly as provided** (starting with https://), not just paths. Do NOT modify, truncate, or invent URLs.
 
 For each recommendation, rate priority:
-- **high**: Priority page with critical/low link count, or orphan page, or missing cocoon code page link
-- **medium**: Would strengthen a cocoon or boost a moderately-linked priority page
+- **high**: Orphan/true orphan target (rule 2), or priority page with critical/low link count
+- **medium**: Strengthens a cocoon (funnel pattern), boosts moderately-linked priority page, or multi-operator comparator reaching a relevant operator target
 - **low**: Nice to have, semantically relevant but not urgent
 
 Respond with a JSON object with this exact structure:
@@ -535,13 +665,13 @@ Respond with a JSON object with this exact structure:
       "source_url": "full URL of the page that should ADD the link",
       "target_url": "full URL of the page being linked TO",
       "suggested_anchor": "the anchor text to use",
-      "reason": "brief explanation (1-2 sentences)",
+      "reason": "brief explanation (1-2 sentences) — mention if target is orphan/priority and why this source was chosen",
       "priority": "high"
     }}
   ]
 }}
 
-Find as many relevant opportunities as you can (aim for 5-15 per batch). Quality over quantity."""
+Find as many relevant opportunities as you can (aim for 5-15 per batch). ORPHANS FIRST — every orphan in the batch must appear as a target in your output."""
 
         for attempt in range(2):  # 1 retry on failure
             try:
@@ -564,13 +694,49 @@ Find as many relevant opportunities as you can (aim for 5-15 per batch). Quality
                         continue
                     if (src_valid, tgt_valid) in existing_links:
                         continue
+
+                    # Semantic relevance scoring (Rule 7 — hybrid hard filter + soft score)
+                    src_ctx = ctx_by_url.get(src_valid)
+                    tgt_ctx = ctx_by_url.get(tgt_valid)
+                    src_ops = operators_for_url.get(src_valid, [])
+                    tgt_ops = operators_for_url.get(tgt_valid, [])
+                    is_multi_op_src = len(src_ops) > 1 or src_valid in multi_operator_urls
+                    target_review = None
+                    for op in tgt_ops:
+                        if review_page_by_op.get(op):
+                            target_review = review_page_by_op[op]
+                            break
+                    scored = score_pair(
+                        source_url=src_valid,
+                        target_url=tgt_valid,
+                        source_ctx=src_ctx,
+                        target_ctx=tgt_ctx,
+                        source_cocoons=src_ops,
+                        target_cocoons=tgt_ops,
+                        source_type=page_type_lookup.get(src_valid),
+                        target_type=page_type_lookup.get(tgt_valid),
+                        target_code_page=code_page_by_url.get(tgt_valid),
+                        target_review_page=target_review,
+                        existing_links=existing_links,
+                        target_keyword=(tgt_ctx.get("target_keyword") if tgt_ctx else None),
+                        target_inbound_anchors=(tgt_ctx.get("inbound_anchors") if tgt_ctx else None),
+                        is_multi_operator_source=is_multi_op_src,
+                        target_is_past_event=is_past_event(
+                            tgt_valid,
+                            page_type=page_type_lookup.get(tgt_valid),
+                            target_keyword=(tgt_ctx.get("target_keyword") if tgt_ctx else None),
+                        ),
+                    )
+                    if not scored["passed"]:
+                        continue
+                    rec["relevance_score"] = scored["score"]
                     all_recommendations.append(rec)
                 break
             except Exception as e:
                 if attempt == 0:
                     time.sleep(3)
                     continue
-                batch_errors.append(f"Recommendations batch: {e}")
+                batch_errors.append(f"Recommendations batch: {_redact(str(e))}")
                 break
 
     return all_recommendations, batch_errors
@@ -680,6 +846,24 @@ def run_ai_analysis(
         recommendations.extend(batch_recs)
         all_batch_errors.extend(rec_errors)
 
+    # Post-AI passes (Steps 6 + 7): link budgets and orphan guarantee
+    page_type_lookup: dict[str, str] = {}
+    for cocoon in cocoons:
+        for url, ptype in cocoon.get("page_types", {}).items():
+            if ptype and url not in page_type_lookup:
+                page_type_lookup[url] = ptype
+    contexts_by_url = {ctx["url"]: ctx for ctx in contexts}
+
+    from src.analysis.link_budget import apply_link_budgets
+    from src.analysis.orphan_guarantee import ensure_orphan_coverage
+
+    recommendations, budget_stats = apply_link_budgets(
+        recommendations, page_type_lookup, contexts_by_url
+    )
+    recommendations, guarantee_stats = ensure_orphan_coverage(
+        recommendations, contexts, cocoons, page_type_lookup
+    )
+
     if progress_callback:
         progress_callback(
             phase="done", fraction=1.0,
@@ -701,4 +885,6 @@ def run_ai_analysis(
         "recommendations": recommendations,
         "token_usage": get_token_usage(),
         "error": error_msg,
+        "budget_stats": budget_stats,
+        "guarantee_stats": guarantee_stats,
     }

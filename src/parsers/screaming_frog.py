@@ -88,33 +88,22 @@ def parse_screaming_frog_csv(uploaded_file) -> tuple[pd.DataFrame | None, str]:
         hyperlink_variants = {"Hyperlink", "Hyperlien", "Hiperenlace", "Hyperlink-Tag", "Collegamento ipertestuale"}
         df = df[df["Type"].isin(hyperlink_variants)].copy()
 
-    # Normalize Link Position values to English
-    # Screaming Frog exports positions in the UI language — some exports mix languages
+    # Normalize Link Position to canonical English values — Screaming Frog localizes this column.
     if "Link Position" in df.columns:
-        position_map = {
-            # French
-            "Contenu": "Content",
-            "En-tête": "Header",
-            "Entête": "Header",
-            "Pied de page": "Footer",
-            # Spanish
-            "Contenido": "Content",
-            "Navegación": "Navigation",
-            "Encabezado": "Header",
-            "Pie de página": "Footer",
-            "Lateral": "Aside",
-            # German
-            "Inhalt": "Content",
-            "Kopfzeile": "Header",
-            "Fußzeile": "Footer",
-            "Seitenleiste": "Aside",
-            # Italian
-            "Contenuto": "Content",
-            "Navigazione": "Navigation",
-            "Intestazione": "Header",
-            "Piè di pagina": "Footer",
+        position_variants = {
+            # Content
+            "Contenu": "Content", "Contenido": "Content", "Inhalt": "Content", "Contenuto": "Content",
+            # Navigation
+            "Navigation": "Navigation", "Navegación": "Navigation", "Navigazione": "Navigation",
+            # Header
+            "En-tête": "Header", "Entête": "Header", "Cabecera": "Header", "Encabezado": "Header", "Kopfzeile": "Header", "Intestazione": "Header",
+            # Footer
+            "Pied de page": "Footer", "Pie de página": "Footer", "Fußzeile": "Footer", "Piè di pagina": "Footer",
+            # Sidebar / Aside
+            "Barre latérale": "Sidebar", "Barra lateral": "Sidebar", "Seitenleiste": "Sidebar", "Barra laterale": "Sidebar",
+            "Aparté": "Aside",
         }
-        df["Link Position"] = df["Link Position"].replace(position_map)
+        df["Link Position"] = df["Link Position"].replace(position_variants)
 
     # Drop rows where Source or Destination is missing
     df = df.dropna(subset=["Source", "Destination"])

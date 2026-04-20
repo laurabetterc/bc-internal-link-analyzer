@@ -34,6 +34,12 @@ def compute_link_audit(df: pd.DataFrame, full_url_list: set | None = None) -> di
     if full_url_list:
         true_orphan_pages = sorted(full_url_list - all_pages)
 
+    # Merged orphan list — both orphan types unified for presentation.
+    # Each entry carries a flag so the UI/export can annotate pages not found in the crawl.
+    all_orphan_pages = [{"url": u, "in_crawl": True} for u in orphan_pages] + [
+        {"url": u, "in_crawl": False} for u in true_orphan_pages
+    ]
+
     # Outbound links per page (how many links each page sends)
     outbound_counts = df.groupby("Source").size()
 
@@ -56,6 +62,8 @@ def compute_link_audit(df: pd.DataFrame, full_url_list: set | None = None) -> di
         "orphan_pages": orphan_pages,
         "true_orphan_count": len(true_orphan_pages),
         "true_orphan_pages": true_orphan_pages,
+        "all_orphan_count": len(orphan_pages) + len(true_orphan_pages),
+        "all_orphan_pages": all_orphan_pages,
         "inbound_avg": round(inbound_avg, 1),
         "inbound_median": round(inbound_median, 1),
         "inbound_max": int(inbound_max),

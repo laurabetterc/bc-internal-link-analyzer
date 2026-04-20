@@ -1,6 +1,5 @@
 """Internal Link Analyzer — Main Streamlit App."""
 
-import copy
 import os
 import sys
 import time
@@ -15,7 +14,7 @@ import plotly.express as px
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Bridge Streamlit Cloud secrets into env vars (so config.py picks them up)
-for _key in ("GEMINI_API_KEY", "ILA_PASSWORD"):
+for _key in ("GEMINI_API_KEY", "ILA_PASSWORD", "ILA_DEV_MODE", "GEMINI_MODEL"):
     if _key not in os.environ:
         try:
             os.environ[_key] = st.secrets[_key]
@@ -32,19 +31,15 @@ import src.config
 importlib.reload(src.config)
 
 from src.config import APP_PASSWORD, GEMINI_API_KEY, HEALTH_CRITICAL_MAX, HEALTH_WARNING_MAX
-from src.parsers.screaming_frog import get_primary_domain, parse_screaming_frog_csv
+from src.parsers.screaming_frog import parse_screaming_frog_csv
 from src.parsers.priority_urls import parse_priority_urls_csv
 from src.cleaning.link_position import get_position_summary, filter_by_positions
-from src.cleaning.url_patterns import (
-    detect_url_patterns, filter_by_patterns, detect_pagination_urls, filter_pagination,
-    detect_template_links, filter_template_links,
-)
+from src.cleaning.url_patterns import detect_url_patterns, filter_by_patterns, detect_pagination_urls, filter_pagination
 from src.analysis.link_audit import compute_link_audit, get_priority_urls_health
 from src.analysis.pagerank import compute_pagerank, get_top_pages, get_pagerank_distribution
 from src.analysis.ai_analyzer import run_ai_analysis, get_token_usage, check_api_health
 from src.analysis.cocoon_health import analyze_cocoon_health
 from src.export.csv_export import generate_linking_plan_csv
-from src.export.html_report import generate_html_report
 from src.ui.components import (
     apply_bc_theme,
     render_header,
@@ -64,6 +59,7 @@ st.set_page_config(
 
 # Apply BC theme
 apply_bc_theme()
+
 
 # Initialize session state
 if "authenticated" not in st.session_state:
@@ -92,14 +88,8 @@ if "cocoon_health_data" not in st.session_state:
     st.session_state.cocoon_health_data = None
 if "token_usage" not in st.session_state:
     st.session_state.token_usage = None
-if "site_domain" not in st.session_state:
-    st.session_state.site_domain = "unknown-site"
 if "ai_health" not in st.session_state:
     st.session_state.ai_health = None  # None = not checked yet
-if "post_excluded_urls" not in st.session_state:
-    st.session_state.post_excluded_urls = set()
-if "_original_ai_results" not in st.session_state:
-    st.session_state._original_ai_results = None
 
 
 def reset_analysis():
@@ -108,17 +98,14 @@ def reset_analysis():
         "sf_data", "priority_data", "full_url_list", "cleaned_data", "position_filtered_data",
         "url_patterns", "position_keep", "pattern_exclude", "exclude_patterns",
         "custom_patterns", "pagination_info", "remove_pagination", "manual_excluded_urls",
-        "template_links_info", "remove_template_links",
         "audit_results", "pagerank_scores", "ai_results", "cocoon_health_data", "token_usage",
-        "ai_health", "_original_ai_results",
+        "ai_health", "market_resolved", "market_detection",
     ]:
         if key in st.session_state:
             if key == "exclude_patterns":
                 st.session_state[key] = []
             else:
                 st.session_state[key] = None
-    st.session_state.post_excluded_urls = set()
-    st.session_state.site_domain = "unknown-site"
     st.session_state.wizard_step = "upload"
 
 
@@ -300,7 +287,6 @@ def render_upload():
                 st.error(f"Screaming Frog CSV error: {error}")
             else:
                 st.session_state.sf_data = df
-                st.session_state.site_domain = get_primary_domain(df)
 
         if st.session_state.sf_data is not None:
             render_upload_confirmation(
@@ -482,7 +468,7 @@ def render_cleaning_step1():
     summary = get_position_summary(df)
 
     # Initialize keep state
-    if not st.session_state.get("position_keep"):
+    if "position_keep" not in st.session_state:
         st.session_state.position_keep = {
             row["Position"]: row["Action"] == "Keep"
             for _, row in summary.iterrows()
@@ -552,9 +538,9 @@ def render_cleaning_step2():
     df = st.session_state.position_filtered_data
 
     # ---- Pagination detection ----
-    if not st.session_state.get("pagination_info"):
+    if "pagination_info" not in st.session_state:
         st.session_state.pagination_info = detect_pagination_urls(df)
-    if st.session_state.get("remove_pagination") is None:
+    if "remove_pagination" not in st.session_state:
         st.session_state.remove_pagination = True
 
     pagination = st.session_state.pagination_info
@@ -591,51 +577,8 @@ def render_cleaning_step2():
         )
         st.markdown("<br>", unsafe_allow_html=True)
 
-    # ---- Template link detection (false "Content" links) ----
-    if not st.session_state.get("template_links_info"):
-        st.session_state.template_links_info = detect_template_links(df)
-    if st.session_state.get("remove_template_links") is None:
-        st.session_state.remove_template_links = True
-
-    template = st.session_state.template_links_info
-    if template["total_paths"] > 0:
-        st.markdown("#### Sitewide template links detected", unsafe_allow_html=True)
-        st.markdown(
-            f"<p style='color:#94A3B8;font-size:14px;margin-bottom:8px;'>"
-            f"Found <strong style='color:#F87171;'>{template['total_paths']}</strong> link positions "
-            f"that repeat on many pages — these are likely navigation bars or menus that "
-            f"Screaming Frog mislabeled as \"Content\" because the HTML uses "
-            f"<code>&lt;div&gt;</code> instead of <code>&lt;nav&gt;</code>.</p>",
-            unsafe_allow_html=True,
-        )
-
-        with st.expander(
-            f"View {template['total_paths']} template patterns ({template['total_links']:,} links)",
-            expanded=False,
-        ):
-            for tp in template["paths"]:
-                anchors_str = ", ".join(f"**{a}**" for a in tp["anchors"][:3]) if tp["anchors"] else "—"
-                st.markdown(
-                    f"<div style='border-left:3px solid rgba(248,113,113,0.4);padding:6px 12px;"
-                    f"margin-bottom:8px;background:rgba(248,113,113,0.05);border-radius:0 6px 6px 0;'>"
-                    f"<span style='font-family:JetBrains Mono,monospace;font-size:11px;color:#64748B;'>"
-                    f"{tp['path']}</span><br>"
-                    f"<span style='font-size:13px;color:#F0F4F8;'>Anchors: {anchors_str}</span>"
-                    f"<span style='font-size:12px;color:#64748B;float:right;'>"
-                    f"{tp['page_count']:,} pages ({tp['page_ratio']:.0%}) · "
-                    f"{tp['link_count']:,} links</span></div>",
-                    unsafe_allow_html=True,
-                )
-
-        st.session_state.remove_template_links = st.checkbox(
-            f"Remove template links ({template['total_links']:,} links across {template['total_paths']} patterns)",
-            value=st.session_state.remove_template_links,
-            key="template_toggle",
-        )
-        st.markdown("<br>", unsafe_allow_html=True)
-
     # Detect patterns (cached)
-    if st.session_state.get("url_patterns") is None:
+    if "url_patterns" not in st.session_state:
         st.session_state.url_patterns = detect_url_patterns(df)
 
     patterns_df = st.session_state.url_patterns
@@ -650,16 +593,12 @@ def render_cleaning_step2():
                     st.rerun()
             with bar_cols[1]:
                 if st.button("Run Analysis →", key="step2_empty_next", use_container_width=True):
-                    cleaned = df
-                    if st.session_state.get("remove_template_links", False) and template["total_paths"] > 0:
-                        tpl_paths = [tp["path"] for tp in template["paths"]]
-                        cleaned = filter_template_links(cleaned, tpl_paths)
-                    st.session_state.cleaned_data = cleaned
+                    st.session_state.cleaned_data = df
                     _start_analysis()
         return
 
     # Pattern toggles — check = exclude
-    if not st.session_state.get("pattern_exclude"):
+    if "pattern_exclude" not in st.session_state:
         st.session_state.pattern_exclude = {
             row["Pattern"]: row["Exclude"]
             for _, row in patterns_df.iterrows()
@@ -704,7 +643,7 @@ def render_cleaning_step2():
     st.markdown("<br>", unsafe_allow_html=True)
 
     # Initialize custom patterns list
-    if st.session_state.get("custom_patterns") is None:
+    if "custom_patterns" not in st.session_state:
         st.session_state.custom_patterns = []
 
     st.markdown(
@@ -808,7 +747,7 @@ def render_cleaning_step2():
         all_urls = [u for u in all_urls if u not in pagination_set]
 
     # Apply manual URL exclusions from the browser
-    if st.session_state.get("manual_excluded_urls") is None:
+    if "manual_excluded_urls" not in st.session_state:
         st.session_state.manual_excluded_urls = set()
     manual_excluded = st.session_state.manual_excluded_urls
     if manual_excluded:
@@ -889,13 +828,7 @@ def render_cleaning_step2():
                 st.rerun()
         with bar_cols[1]:
             if st.button("Run Analysis →", key="step2_next", use_container_width=True):
-                cleaned = df
-                # Apply template link filter (removes individual link rows by Link Path)
-                if st.session_state.get("remove_template_links", False) and template["total_paths"] > 0:
-                    tpl_paths = [tp["path"] for tp in template["paths"]]
-                    cleaned = filter_template_links(cleaned, tpl_paths)
-                # Apply URL pattern filter (removes all links involving matched URLs)
-                cleaned = filter_by_patterns(cleaned, exclude_patterns)
+                cleaned = filter_by_patterns(df, exclude_patterns)
                 # Apply pagination filter
                 if st.session_state.get("remove_pagination", False) and pagination["count"] > 0:
                     cleaned = filter_pagination(cleaned, pagination["urls"])
@@ -910,7 +843,7 @@ def render_cleaning_step2():
 
 
 def _start_analysis():
-    """Transition to the analyzing screen. Blocks if AI is not available."""
+    """Transition to the analyzing screen. Blocks if AI is not available or market is ambiguous."""
     ai_health = st.session_state.get("ai_health")
     if not ai_health or not ai_health.get("ok"):
         error_detail = ai_health.get("error", "Unknown error") if ai_health else "Not checked"
@@ -921,6 +854,32 @@ def _start_analysis():
             f"paste a valid Gemini API key, and click **Connect**."
         )
         return
+
+    # Market gate (linking-rules.md section 5) — block when market is ambiguous
+    if not st.session_state.get("market_resolved"):
+        from src.analysis.market_detector import detect_market
+        cleaned = st.session_state.cleaned_data
+        all_urls = pd.unique(pd.concat([cleaned["Source"], cleaned["Destination"]])).tolist()
+        detection = detect_market(all_urls)
+        st.session_state.market_detection = detection
+        if detection["status"] == "resolved":
+            st.session_state.market_resolved = detection["market"]
+        else:
+            # Stop here — user needs to pick a market
+            st.warning(
+                f"**Market detection is ambiguous** — {detection.get('evidence', '')}\n\n"
+                f"Please specify the target market below and click **Confirm market**, "
+                f"then click **Run Analysis** again."
+            )
+            from src.analysis.market_detector import COUNTRY_CODES
+            options = ["— Pick a market —"] + sorted(COUNTRY_CODES) + ["multi-market (AI infers per page)"]
+            choice = st.selectbox("Market", options, key="market_picker")
+            if st.button("Confirm market", key="market_confirm"):
+                if choice and not choice.startswith("—"):
+                    st.session_state.market_resolved = choice
+                    st.rerun()
+            return
+
     st.session_state.wizard_step = "analyzing"
     st.rerun()
 
@@ -931,11 +890,6 @@ def _start_analysis():
 def render_analyzing():
     """Run all analysis steps with visible progress, then switch to results."""
     cleaned = st.session_state.cleaned_data
-    # Apply post-analysis URL exclusions (for AI re-runs after refining results)
-    post_excluded = st.session_state.get("post_excluded_urls", set())
-    if post_excluded:
-        mask = cleaned["Source"].isin(post_excluded) | cleaned["Destination"].isin(post_excluded)
-        cleaned = cleaned[~mask].copy()
     priority = st.session_state.priority_data
 
     # Auto-scroll to top on page load
@@ -1015,9 +969,7 @@ def render_analyzing():
     try:
         audit = compute_link_audit(cleaned, full_url_list=st.session_state.full_url_list)
         st.session_state.audit_results = audit
-        orphan_summary = f"{audit['orphan_count']:,} orphans"
-        if audit.get("true_orphan_count", 0) > 0:
-            orphan_summary += f", {audit['true_orphan_count']:,} true orphans"
+        orphan_summary = f"{audit['all_orphan_count']:,} orphans"
         step1_ph.markdown(
             _step("done", "Link audit", f"\u2014 {audit['total_pages']:,} pages, {orphan_summary}"),
             unsafe_allow_html=True,
@@ -1192,8 +1144,6 @@ def render_analyzing():
             f"\u2705 Complete \u2014 {_fmt_time(time.time() - start_time)}</p>",
             unsafe_allow_html=True,
         )
-        # Save original AI results for post-analysis filtering (before any exclusions)
-        st.session_state._original_ai_results = copy.deepcopy(st.session_state.ai_results)
         time.sleep(1)
         st.session_state.wizard_step = "results"
         st.rerun()
@@ -1206,200 +1156,6 @@ def render_analyzing():
         st.error(f"Analysis could not complete: {analysis_error}")
         if st.button("Try Again", use_container_width=True):
             st.session_state.wizard_step = "step2"
-            st.rerun()
-
-
-def get_effective_data():
-    """Get cleaned data with post-analysis exclusions applied."""
-    cleaned = st.session_state.cleaned_data
-    excluded = st.session_state.get("post_excluded_urls", set())
-    if not excluded:
-        return cleaned
-    mask = cleaned["Source"].isin(excluded) | cleaned["Destination"].isin(excluded)
-    return cleaned[~mask].copy()
-
-
-def recalculate_with_exclusions():
-    """Recalculate audit + PageRank instantly, filter AI results from originals."""
-    excluded = st.session_state.post_excluded_urls
-    effective = get_effective_data()
-
-    # Recalculate audit
-    full_url_list = st.session_state.full_url_list
-    effective_url_list = (full_url_list - excluded) if (full_url_list and excluded) else full_url_list
-    st.session_state.audit_results = compute_link_audit(effective, full_url_list=effective_url_list)
-
-    # Recalculate PageRank
-    st.session_state.pagerank_scores = compute_pagerank(effective) if len(effective) > 0 else {}
-
-    # Filter AI results from originals (not from already-filtered results)
-    original_ai = st.session_state.get("_original_ai_results")
-    if original_ai:
-        ai_results = copy.deepcopy(original_ai)
-
-        if excluded:
-            # Filter recommendations
-            ai_results["recommendations"] = [
-                r for r in ai_results.get("recommendations", [])
-                if r.get("source_url") not in excluded and r.get("target_url") not in excluded
-            ]
-            # Filter cocoons
-            filtered_cocoons = []
-            for cocoon in ai_results.get("cocoons", []):
-                if cocoon.get("code_page") in excluded:
-                    continue
-                new_pages = [p for p in cocoon.get("pages", []) if p not in excluded]
-                if new_pages:
-                    filtered_cocoons.append({**cocoon, "pages": new_pages})
-            ai_results["cocoons"] = filtered_cocoons
-
-        st.session_state.ai_results = ai_results
-
-        # Recompute cocoon health on the effective link data
-        if ai_results.get("cocoons"):
-            st.session_state.cocoon_health_data = analyze_cocoon_health(
-                ai_results["cocoons"], effective,
-            )
-        else:
-            st.session_state.cocoon_health_data = None
-
-
-def _find_matching_urls(input_text, all_urls):
-    """Find URLs matching user input (full URLs or substring patterns)."""
-    matched = set()
-    for line in input_text.strip().split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith("http"):
-            # Exact URL match
-            if line in all_urls:
-                matched.add(line)
-        else:
-            # Substring match — find all URLs containing this fragment
-            for url in all_urls:
-                if line in url:
-                    matched.add(url)
-    return matched
-
-
-def _render_refine_panel():
-    """Render the post-analysis URL exclusion panel on the results screen."""
-    current_excluded = st.session_state.post_excluded_urls
-    all_urls = (
-        set(st.session_state.cleaned_data["Source"].unique())
-        | set(st.session_state.cleaned_data["Destination"].unique())
-    )
-
-    # Expander label changes based on state
-    if current_excluded:
-        label = f"Refine results — {len(current_excluded):,} URLs excluded"
-    else:
-        label = "Refine results — exclude more URLs"
-
-    with st.expander(label, expanded=False):
-        st.markdown(
-            "<p style='color:#94A3B8;font-size:13px;margin-bottom:12px;'>"
-            "Spotted URLs that should have been excluded? Add them here and recalculate instantly — "
-            "no need to re-run the full AI analysis. Enter full URLs or a path fragment "
-            "(e.g. <code>/category/</code>) to match multiple URLs.</p>",
-            unsafe_allow_html=True,
-        )
-
-        url_input = st.text_area(
-            "URLs or patterns to exclude",
-            placeholder="Paste URLs or enter path fragments, one per line\n"
-                        "Examples:\n"
-                        "https://example.com/category/page\n"
-                        "/author/\n"
-                        "/tag/",
-            height=100,
-            label_visibility="collapsed",
-            key="refine_url_input",
-        )
-
-        # Preview matches
-        if url_input and url_input.strip():
-            matched = _find_matching_urls(url_input, all_urls)
-            new_matched = matched - current_excluded
-            if new_matched:
-                mask = (
-                    st.session_state.cleaned_data["Source"].isin(new_matched)
-                    | st.session_state.cleaned_data["Destination"].isin(new_matched)
-                )
-                affected_links = mask.sum()
-                st.markdown(
-                    f"<p style='color:#FBBF24;font-size:13px;'>"
-                    f"Matched <strong>{len(new_matched):,}</strong> new URLs "
-                    f"({affected_links:,} links affected).</p>",
-                    unsafe_allow_html=True,
-                )
-                with st.expander(f"Preview matched URLs ({len(new_matched)})"):
-                    st.dataframe(
-                        pd.DataFrame({"URL": sorted(new_matched)}),
-                        use_container_width=True, hide_index=True, height=200,
-                    )
-            elif matched:
-                st.markdown(
-                    "<p style='color:#64748B;font-size:13px;'>All matched URLs are already excluded.</p>",
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    "<p style='color:#64748B;font-size:13px;'>No matching URLs found in the data.</p>",
-                    unsafe_allow_html=True,
-                )
-
-        # Show current exclusions
-        if current_excluded:
-            st.markdown(
-                f"<p style='color:#94A3B8;font-size:13px;margin-top:12px;'>"
-                f"Currently excluding <strong style='color:#F87171;'>{len(current_excluded):,}</strong> URLs.</p>",
-                unsafe_allow_html=True,
-            )
-            with st.expander(f"View excluded URLs ({len(current_excluded)})"):
-                st.dataframe(
-                    pd.DataFrame({"URL": sorted(current_excluded)}),
-                    use_container_width=True, hide_index=True, height=200,
-                )
-
-        # Action buttons
-        btn_cols = st.columns(3)
-        with btn_cols[0]:
-            add_clicked = st.button(
-                "Exclude & Recalculate",
-                use_container_width=True,
-                disabled=not (url_input and url_input.strip()),
-                type="primary",
-            )
-        with btn_cols[1]:
-            clear_clicked = st.button(
-                "Clear all exclusions",
-                use_container_width=True,
-                disabled=not current_excluded,
-            )
-        with btn_cols[2]:
-            rerun_ai_clicked = st.button(
-                "Re-run AI analysis",
-                use_container_width=True,
-                disabled=not current_excluded,
-                help="Re-runs the full Gemini AI analysis on the filtered data. Takes several minutes.",
-            )
-
-        if add_clicked and url_input and url_input.strip():
-            new_urls = _find_matching_urls(url_input, all_urls)
-            if new_urls:
-                st.session_state.post_excluded_urls |= new_urls
-                recalculate_with_exclusions()
-                st.rerun()
-
-        if clear_clicked:
-            st.session_state.post_excluded_urls = set()
-            recalculate_with_exclusions()
-            st.rerun()
-
-        if rerun_ai_clicked:
-            st.session_state.wizard_step = "analyzing"
             st.rerun()
 
 
@@ -1416,7 +1172,7 @@ def render_results():
 
     audit = st.session_state.audit_results
     scores = st.session_state.pagerank_scores
-    cleaned = get_effective_data()  # cleaned_data minus post-analysis exclusions
+    cleaned = st.session_state.cleaned_data
     priority = st.session_state.priority_data
 
     # Results header with "New Analysis" button
@@ -1435,42 +1191,22 @@ def render_results():
         unsafe_allow_html=True,
     )
 
-    # ---- Refine: Exclude more URLs (post-analysis) ----
-    _render_refine_panel()
-
     # ---- Overview stat cards ----
     st.markdown(f"### Overview {render_badge('Audit')}", unsafe_allow_html=True)
 
-    true_orphan_count = audit.get("true_orphan_count", 0)
-    if true_orphan_count > 0:
-        c1, c2, c3, c4, c5 = st.columns(5)
-    else:
-        c1, c2, c3, c4 = st.columns(4)
-
-    _hint_css = "color:#64748B;font-size:11px;text-align:center;margin-top:6px;"
-
+    all_orphan_count = audit.get("all_orphan_count", audit.get("orphan_count", 0))
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.markdown(render_stat_card(f"{audit['total_pages']:,}", "Total Pages"), unsafe_allow_html=True)
-        st.markdown(f"<p style='{_hint_css}'>Unique pages found in the crawl after cleaning</p>", unsafe_allow_html=True)
     with c2:
         st.markdown(render_stat_card(f"{audit['total_links']:,}", "Internal Links"), unsafe_allow_html=True)
-        st.markdown(f"<p style='{_hint_css}'>Content links between pages (no nav/footer)</p>", unsafe_allow_html=True)
     with c3:
         st.markdown(
-            render_stat_card(f"{audit['orphan_count']:,}", "Orphan Pages", danger=audit['orphan_count'] > 0),
+            render_stat_card(f"{all_orphan_count:,}", "Orphan Pages", danger=all_orphan_count > 0),
             unsafe_allow_html=True,
         )
-        st.markdown(f"<p style='{_hint_css}'>Pages in the crawl with zero inbound content links</p>", unsafe_allow_html=True)
     with c4:
         st.markdown(render_stat_card(f"{audit['inbound_avg']}", "Avg Inbound Links", accent=True), unsafe_allow_html=True)
-        st.markdown(f"<p style='{_hint_css}'>Average number of content links pointing to each page</p>", unsafe_allow_html=True)
-    if true_orphan_count > 0:
-        with c5:
-            st.markdown(
-                render_stat_card(f"{true_orphan_count:,}", "True Orphans", danger=True),
-                unsafe_allow_html=True,
-            )
-            st.markdown(f"<p style='{_hint_css}'>Pages from your URL list not found in the crawl at all — completely invisible</p>", unsafe_allow_html=True)
 
     # ---- Link distribution details ----
     st.markdown("<br>", unsafe_allow_html=True)
@@ -1492,34 +1228,42 @@ def render_results():
                 f"- Min: **{audit['outbound_min']}** / Max: **{audit['outbound_max']}**"
             )
 
-    # ---- Orphan pages ----
-    if audit["orphan_count"] > 0:
-        with st.expander(f"Orphan pages ({audit['orphan_count']}) — pages with no internal links pointing to them"):
-            st.markdown(
-                "<p style='color:#94A3B8;font-size:13px;margin-bottom:12px;'>"
-                "These pages receive zero content links from other pages on your site. "
-                "Search engines may struggle to find and rank them. Add internal links to fix this.</p>",
-                unsafe_allow_html=True,
-            )
-            orphan_df = pd.DataFrame({"URL": audit["orphan_pages"]})
-            st.dataframe(orphan_df, use_container_width=True, hide_index=True, height=300)
-
-    # ---- True orphan pages (from full URL list) ----
-    if audit.get("true_orphan_count", 0) > 0:
+    # ---- Orphan pages (merged: in-crawl orphans + true orphans from URL list) ----
+    if all_orphan_count > 0:
+        not_in_crawl = audit.get("true_orphan_count", 0)
         with st.expander(
-            f"True orphan pages ({audit['true_orphan_count']}) — "
-            f"pages not found anywhere in the crawl",
-            expanded=True,
+            f"Orphan pages ({all_orphan_count}) — pages with zero inbound internal links",
+            expanded=not_in_crawl > 0,
         ):
             st.markdown(
                 "<p style='color:#94A3B8;font-size:13px;margin-bottom:12px;'>"
-                "These pages exist on your site but <strong style='color:#F87171;'>no other page links to them at all</strong>. "
-                "They don't appear in the Screaming Frog crawl because the crawler can't discover them "
-                "without at least one internal link. These are the highest-priority orphans to fix.</p>",
+                "These pages receive zero content links from other pages on your site. "
+                "Search engines may struggle to find and rank them. "
+                "Every orphan must get at least one inbound link."
+                + (
+                    f" <strong style='color:#F87171;'>{not_in_crawl:,}</strong> of them aren't in the crawl at all "
+                    "(flagged <em>Not in crawl</em> below) — these are the most critical to fix."
+                    if not_in_crawl > 0
+                    else ""
+                )
+                + "</p>",
                 unsafe_allow_html=True,
             )
-            true_orphan_df = pd.DataFrame({"URL": audit["true_orphan_pages"]})
-            st.dataframe(true_orphan_df, use_container_width=True, hide_index=True, height=300)
+            orphan_rows = audit.get("all_orphan_pages") or [
+                {"url": u, "in_crawl": True} for u in audit.get("orphan_pages", [])
+            ]
+            orphan_df = pd.DataFrame(
+                [
+                    {"URL": r["url"], "Status": "In crawl" if r["in_crawl"] else "Not in crawl"}
+                    for r in orphan_rows
+                ]
+            )
+            st.dataframe(orphan_df, use_container_width=True, hide_index=True, height=300)
+
+            # Copy-to-clipboard button — plain URL list
+            url_text = "\n".join(r["url"] for r in orphan_rows)
+            st.code(url_text, language=None)
+            st.caption("Click the copy icon on the top-right of the box to copy the full orphan list.")
 
     # ---- PageRank distribution ----
     st.markdown("<br>", unsafe_allow_html=True)
@@ -1778,16 +1522,45 @@ def render_results():
                     if r.get("priority", "").lower() == filter_priority.lower()
                 ]
 
+            # Build orphan + priority lookup so we can tag targets
+            orphan_set = set(audit.get("orphan_pages", [])) | set(audit.get("true_orphan_pages", []))
+            priority_set = set(st.session_state.priority_data["URL"].tolist()) if st.session_state.priority_data is not None else set()
+
+            def _target_status(target_url: str, is_fallback: bool) -> str:
+                if is_fallback:
+                    return "Fallback"
+                if target_url in orphan_set:
+                    return "Orphan"
+                if target_url in priority_set:
+                    return "Priority"
+                return "Standard"
+
+            def _tagged_reason(rec: dict, status: str) -> str:
+                base = rec.get("reason", "")
+                # Don't double-tag if AI already prefixed it
+                if base.startswith("[Orphan target]") or base.startswith("[Priority target]") or base.startswith("[Fallback link]"):
+                    return base
+                if status == "Orphan":
+                    return f"[Orphan target] {base}".strip()
+                if status == "Priority":
+                    return f"[Priority target] {base}".strip()
+                if status == "Fallback":
+                    return f"[Fallback link] {base}".strip()
+                return base
+
             # Build recommendations dataframe
             recs_rows = []
             for rec in filtered_recs:
                 priority_icons = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+                status = _target_status(rec.get("target_url", ""), bool(rec.get("is_fallback")))
                 recs_rows.append({
                     "Priority": priority_icons.get(rec.get("priority", ""), ""),
                     "Source URL": rec.get("source_url", ""),
                     "Target URL": rec.get("target_url", ""),
-                    "Suggested Anchor": rec.get("suggested_anchor", ""),
-                    "Reason": rec.get("reason", ""),
+                    "Anchor": rec.get("suggested_anchor", ""),
+                    "Status": status,
+                    "Score": int(rec.get("relevance_score", 0)),
+                    "Reason": _tagged_reason(rec, status),
                 })
 
             recs_df = pd.DataFrame(recs_rows)
@@ -1800,9 +1573,15 @@ def render_results():
                     height=min(600, 40 + len(recs_df) * 35),
                     column_config={
                         "Priority": st.column_config.TextColumn("", width="small"),
-                        "Source URL": st.column_config.TextColumn("Source URL", width="medium"),
-                        "Target URL": st.column_config.TextColumn("Target URL", width="medium"),
-                        "Suggested Anchor": st.column_config.TextColumn("Anchor Text", width="medium"),
+                        "Source URL": st.column_config.LinkColumn(
+                            "Source URL", width="medium", display_text=r"https?://[^/]+(/.+)?",
+                        ),
+                        "Target URL": st.column_config.LinkColumn(
+                            "Target URL", width="medium", display_text=r"https?://[^/]+(/.+)?",
+                        ),
+                        "Anchor": st.column_config.TextColumn("Anchor", width="medium"),
+                        "Status": st.column_config.TextColumn("Target", width="small"),
+                        "Score": st.column_config.NumberColumn("Score", width="small", format="%d"),
                         "Reason": st.column_config.TextColumn("Reason", width="large"),
                     },
                 )
@@ -1836,115 +1615,73 @@ def render_results():
         st.markdown(
             f"<p style='color:#64748B;font-size:12px;margin-top:8px;'>"
             f"Total: {total:,} tokens. "
-            f"Estimated cost: ~${(token_usage['prompt_tokens'] * 0.30 + (token_usage['completion_tokens'] + token_usage['thinking_tokens']) * 2.50) / 1_000_000:.4f} "
-            f"(free tier available — see ai.google.dev/gemini-api/docs/pricing)</p>",
+            f"Estimated cost: ~${(token_usage['prompt_tokens'] * 0.10 + token_usage['completion_tokens'] * 0.40) / 1_000_000:.4f} "
+            f"(free tier: 20 req/day, 1M tokens/day)</p>",
             unsafe_allow_html=True,
         )
 
-    # ---- Sticky download banner ----
-    import base64
-    from datetime import datetime as _dt
+    # ---- CSV Download ----
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("---")
+    st.markdown("<br>", unsafe_allow_html=True)
 
     recommendations = ai_results.get("recommendations", []) if ai_results else []
 
-    site_slug = st.session_state.site_domain.replace(".", "-")
-    date_slug = _dt.now().strftime("%Y-%m-%d")
-    base_name = f"{site_slug}-{date_slug}"
-
+    csv_orphans = set(audit.get("orphan_pages", [])) | set(audit.get("true_orphan_pages", []))
+    csv_priorities = (
+        set(st.session_state.priority_data["URL"].tolist())
+        if st.session_state.priority_data is not None
+        else set()
+    )
     csv_content = generate_linking_plan_csv(
         cleaned_df=cleaned,
         recommendations=recommendations,
+        orphan_urls=csv_orphans,
+        priority_urls=csv_priorities,
     )
+
+    # Side-by-side downloads: CSV + HTML report
+    from datetime import datetime as _dt
+    from src.export.html_report import generate_html_report
+    from src.analysis.link_audit import get_priority_urls_health
+    from src.parsers.screaming_frog import get_primary_domain
+
+    site_domain = get_primary_domain(cleaned)
+    date_slug = _dt.now().strftime("%Y-%m-%d")
+    base_name = f"{site_domain.replace('.', '-')}-{date_slug}"
+
     health_df = get_priority_urls_health(
-        cleaned, priority, pagerank_scores=scores,
+        cleaned, st.session_state.priority_data, pagerank_scores=scores,
         critical_max=HEALTH_CRITICAL_MAX, warning_max=HEALTH_WARNING_MAX,
-    )
+    ) if st.session_state.priority_data is not None else None
+
     html_content = generate_html_report(
-        site_domain=st.session_state.site_domain,
+        site_domain=site_domain,
         audit=audit,
         pagerank_scores=scores,
-        priority_health_df=health_df,
-        cocoon_health_df=st.session_state.cocoon_health_data,
+        priority_health_df=health_df if health_df is not None else pd.DataFrame(columns=["URL", "Target Keyword", "Content Type", "Inbound Links", "Health", "PageRank"]),
+        cocoon_health_df=st.session_state.get("cocoon_health_data"),
         recommendations=recommendations,
-        token_usage=st.session_state.token_usage,
+        token_usage=st.session_state.get("token_usage"),
     )
 
-    csv_b64 = base64.b64encode(csv_content.encode("utf-8")).decode()
-    html_b64 = base64.b64encode(html_content.encode("utf-8")).decode()
-
-    # Bottom padding so content isn't hidden behind the sticky bar
-    st.markdown("<div style='height:80px;'></div>", unsafe_allow_html=True)
-
-    st.markdown(
-        f"""
-        <style>
-        .sticky-dl-bar {{
-            position: fixed;
-            bottom: 0;
-            left: 0;
-            right: 0;
-            z-index: 999;
-            background: rgba(15, 23, 42, 0.85);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            border-top: 1px solid rgba(52, 211, 153, 0.2);
-            padding: 12px 24px;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            gap: 16px;
-        }}
-        .sticky-dl-bar .dl-label {{
-            color: #94A3B8;
-            font-family: 'DM Sans', sans-serif;
-            font-size: 13px;
-            margin-right: 8px;
-        }}
-        .sticky-dl-bar a {{
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            padding: 8px 20px;
-            border-radius: 8px;
-            font-family: 'DM Sans', sans-serif;
-            font-size: 13px;
-            font-weight: 600;
-            text-decoration: none;
-            transition: all 0.2s ease;
-        }}
-        .sticky-dl-bar a.dl-csv {{
-            background: linear-gradient(135deg, #0EA5E9, #0284C7);
-            color: #FFFFFF;
-        }}
-        .sticky-dl-bar a.dl-csv:hover {{
-            box-shadow: 0 0 16px rgba(14, 165, 233, 0.4);
-            transform: translateY(-1px);
-        }}
-        .sticky-dl-bar a.dl-html {{
-            background: linear-gradient(135deg, #34D399, #059669);
-            color: #FFFFFF;
-        }}
-        .sticky-dl-bar a.dl-html:hover {{
-            box-shadow: 0 0 16px rgba(52, 211, 153, 0.4);
-            transform: translateY(-1px);
-        }}
-        </style>
-        <div class="sticky-dl-bar">
-            <span class="dl-label">Downloads</span>
-            <a class="dl-csv"
-               href="data:text/csv;base64,{csv_b64}"
-               download="{base_name}-linking-plan.csv">
-                Linking Plan (CSV)
-            </a>
-            <a class="dl-html"
-               href="data:text/html;base64,{html_b64}"
-               download="{base_name}-report.html">
-                Full Report (HTML)
-            </a>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    dl_csv, dl_html = st.columns(2)
+    with dl_csv:
+        st.download_button(
+            label="Download Linking Plan (CSV)",
+            data=csv_content,
+            file_name=f"{base_name}-linking-plan.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    with dl_html:
+        st.download_button(
+            label="Download Full Report (HTML)",
+            data=html_content,
+            file_name=f"{base_name}-report.html",
+            mime="text/html",
+            use_container_width=True,
+        )
 
 
 # ============================================================
@@ -1987,7 +1724,12 @@ def main():
         expanded=not (ai_health and ai_health["ok"]),
         icon=":material/check_circle:" if (ai_health and ai_health["ok"]) else ":material/error:",
     ):
-        key_col, btn_col = st.columns([3, 1])
+        # Dev mode shows the model picker for A/B testing; production hides it.
+        if src.config.ILA_DEV_MODE:
+            key_col, model_col, btn_col = st.columns([2, 1.2, 1])
+        else:
+            key_col, btn_col = st.columns([3, 1])
+            model_col = None
         with key_col:
             api_key_input = st.text_input(
                 "Gemini API Key",
@@ -1995,15 +1737,48 @@ def main():
                 placeholder="Paste your Gemini API key (optional — uses default if empty)",
                 label_visibility="collapsed",
             )
+        model_input = ""
+        if model_col is not None:
+            with model_col:
+                current_model = os.environ.get("GEMINI_MODEL", src.config.GEMINI_MODEL)
+                model_input = st.text_input(
+                    "Model ID",
+                    value=current_model,
+                    placeholder="gemini-3.1-pro-preview",
+                    label_visibility="collapsed",
+                    help="Dev only — override the Gemini model ID. Verify with Google's docs before swapping.",
+                )
         with btn_col:
             if st.button("Connect", use_container_width=True):
                 if api_key_input and api_key_input.strip():
                     st.session_state.user_api_key = api_key_input.strip()
                     os.environ["GEMINI_API_KEY"] = api_key_input.strip()
-                    importlib.reload(src.config)
+                if model_input and model_input.strip():
+                    os.environ["GEMINI_MODEL"] = model_input.strip()
+                importlib.reload(src.config)
                 # Re-run health check with new key
                 st.session_state.ai_health = check_api_health()
                 st.rerun()
+
+        # Status + disconnect control — never reveals the key itself.
+        if ai_health and ai_health.get("ok"):
+            if st.session_state.get("user_api_key"):
+                source = "your session (cleared on Disconnect)"
+            elif st.secrets.get("GEMINI_API_KEY", None):
+                source = "Streamlit secrets"
+            elif os.environ.get("GEMINI_API_KEY"):
+                source = "environment variable"
+            else:
+                source = "default"
+            st.caption(f"Key source: {source}. The key is never displayed or logged.")
+            if st.button("Disconnect / clear key", key="disconnect_api", type="tertiary"):
+                st.session_state.user_api_key = None
+                if "GEMINI_API_KEY" in os.environ:
+                    del os.environ["GEMINI_API_KEY"]
+                importlib.reload(src.config)
+                st.session_state.ai_health = check_api_health()
+                st.rerun()
+
         if ai_health and not ai_health["ok"]:
             st.markdown(
                 f"<p style='color:#F87171;font-size:13px;margin-top:4px;'>"

@@ -65,7 +65,7 @@ def generate_linking_plan(
     ws_plan.title = "Linking Plan"
 
     # Header row
-    headers = ["Source URL", "Anchor", "Target URL", "Status", "Priority", "Reason"]
+    headers = ["Source URL", "Anchor", "Target URL", "Status", "Target Status", "Score", "Priority", "Reason"]
     for col, header in enumerate(headers, 1):
         cell = ws_plan.cell(row=1, column=col, value=header)
         cell.font = HEADER_FONT
@@ -77,8 +77,35 @@ def generate_linking_plan(
     ws_plan.column_dimensions["B"].width = 35  # Anchor
     ws_plan.column_dimensions["C"].width = 55  # Target URL
     ws_plan.column_dimensions["D"].width = 12  # Status
-    ws_plan.column_dimensions["E"].width = 10  # Priority
-    ws_plan.column_dimensions["F"].width = 50  # Reason
+    ws_plan.column_dimensions["E"].width = 14  # Target Status
+    ws_plan.column_dimensions["F"].width = 8   # Score
+    ws_plan.column_dimensions["G"].width = 10  # Priority
+    ws_plan.column_dimensions["H"].width = 50  # Reason
+
+    # Tagging helpers — orphans + priority lookup
+    orphan_set = set(audit_results.get("orphan_pages", [])) | set(audit_results.get("true_orphan_pages", []))
+    priority_set = set(priority_health_df["URL"].tolist()) if priority_health_df is not None else set()
+
+    def _target_status(target_url: str, is_fallback: bool) -> str:
+        if is_fallback:
+            return "Fallback"
+        if target_url in orphan_set:
+            return "Orphan"
+        if target_url in priority_set:
+            return "Priority"
+        return "Standard"
+
+    def _tagged_reason(rec: dict, status: str) -> str:
+        base = rec.get("reason", "")
+        if base.startswith("[Orphan target]") or base.startswith("[Priority target]") or base.startswith("[Fallback link]"):
+            return base
+        if status == "Orphan":
+            return f"[Orphan target] {base}".strip()
+        if status == "Priority":
+            return f"[Priority target] {base}".strip()
+        if status == "Fallback":
+            return f"[Fallback link] {base}".strip()
+        return base
 
     row_num = 2
 
@@ -88,7 +115,9 @@ def generate_linking_plan(
         anchor = rec.get("suggested_anchor", "")
         target = rec.get("target_url", "")
         priority = rec.get("priority", "")
-        reason = rec.get("reason", "")
+        target_status_val = _target_status(target, bool(rec.get("is_fallback")))
+        score = int(rec.get("relevance_score", 0))
+        reason = _tagged_reason(rec, target_status_val)
 
         ws_plan.cell(row=row_num, column=1, value=source).font = BODY_FONT
         ws_plan.cell(row=row_num, column=2, value=anchor).font = BODY_FONT
@@ -98,10 +127,12 @@ def generate_linking_plan(
         status_cell.font = STATUS_FONTS["to add"]
         status_cell.fill = STATUS_FILLS["to add"]
 
-        ws_plan.cell(row=row_num, column=5, value=priority).font = BODY_FONT
-        ws_plan.cell(row=row_num, column=6, value=reason).font = BODY_FONT
+        ws_plan.cell(row=row_num, column=5, value=target_status_val).font = BODY_FONT
+        ws_plan.cell(row=row_num, column=6, value=score).font = BODY_FONT
+        ws_plan.cell(row=row_num, column=7, value=priority).font = BODY_FONT
+        ws_plan.cell(row=row_num, column=8, value=reason).font = BODY_FONT
 
-        for col in range(1, 7):
+        for col in range(1, 9):
             ws_plan.cell(row=row_num, column=col).border = THIN_BORDER
             ws_plan.cell(row=row_num, column=col).alignment = Alignment(vertical="center", wrap_text=True)
 
@@ -125,10 +156,13 @@ def generate_linking_plan(
             status_cell.font = STATUS_FONTS["live"]
             status_cell.fill = STATUS_FILLS["live"]
 
-            ws_plan.cell(row=row_num, column=5, value="").font = BODY_FONT
-            ws_plan.cell(row=row_num, column=6, value="Existing link").font = BODY_FONT
+            live_status = _target_status(target, False)
+            ws_plan.cell(row=row_num, column=5, value=live_status).font = BODY_FONT
+            ws_plan.cell(row=row_num, column=6, value="").font = BODY_FONT
+            ws_plan.cell(row=row_num, column=7, value="").font = BODY_FONT
+            ws_plan.cell(row=row_num, column=8, value="Existing link").font = BODY_FONT
 
-            for col in range(1, 7):
+            for col in range(1, 9):
                 ws_plan.cell(row=row_num, column=col).border = THIN_BORDER
                 ws_plan.cell(row=row_num, column=col).alignment = Alignment(vertical="center", wrap_text=True)
 
@@ -137,7 +171,7 @@ def generate_linking_plan(
     # Freeze header row
     ws_plan.freeze_panes = "A2"
     # Auto-filter
-    ws_plan.auto_filter.ref = f"A1:F{max(row_num - 1, 1)}"
+    ws_plan.auto_filter.ref = f"A1:H{max(row_num - 1, 1)}"
 
     # ---- Sheet 2: Summary ----
     ws_summary = wb.create_sheet("Summary")
@@ -158,8 +192,15 @@ def generate_linking_plan(
     stats = [
         ("Total Pages", f"{audit_results['total_pages']:,}"),
         ("Total Internal Links", f"{audit_results['total_links']:,}"),
-        ("Orphan Pages", f"{audit_results['orphan_count']:,}"),
-        ("True Orphan Pages", f"{audit_results.get('true_orphan_count', 0):,}"),
+        (
+            "Orphan Pages",
+            f"{audit_results.get('all_orphan_count', audit_results['orphan_count']):,}"
+            + (
+                f" (incl. {audit_results['true_orphan_count']:,} not in crawl)"
+                if audit_results.get("true_orphan_count", 0) > 0
+                else ""
+            ),
+        ),
         ("Avg Inbound Links/Page", str(audit_results["inbound_avg"])),
         ("Median Inbound Links/Page", str(audit_results["inbound_median"])),
         ("Max Inbound Links", str(audit_results["inbound_max"])),
