@@ -289,6 +289,66 @@ def is_substring_pattern(pattern: str) -> bool:
     return not pattern.startswith("/")
 
 
+# ---- News / timely URL detection (A6) ----
+
+# Each pattern matches a recognisable shape for time-sensitive content. Keys are user-facing labels.
+_NEWS_PATTERNS: dict[str, re.Pattern[str]] = {
+    "/news/": re.compile(r"/news/", re.IGNORECASE),
+    "/match(es)/": re.compile(r"/match(?:es)?/", re.IGNORECASE),
+    "/blog/": re.compile(r"/blog/", re.IGNORECASE),
+    "/article(s)/": re.compile(r"/articles?/", re.IGNORECASE),
+    "/{year}/{month}/": re.compile(r"/(?:19|20)\d{2}/(?:0?[1-9]|1[0-2])(?:/|$)"),
+    "/{year}-{month}-{day}-…": re.compile(r"/(?:19|20)\d{2}-(?:0?[1-9]|1[0-2])-(?:0?[1-9]|[12]\d|3[01])-"),
+}
+
+
+def detect_news_patterns(df: pd.DataFrame) -> dict:
+    """Detect URLs that look like time-sensitive (news / match / blog / dated) content.
+
+    Returns dict with:
+        patterns: list of {label, urls (set), url_count, link_count, example}
+                  sorted by url_count desc, only patterns with at least one match
+        total_urls: count of unique URLs caught by any news pattern (no double-count)
+    """
+    all_urls = pd.concat([df["Source"], df["Destination"]]).drop_duplicates().tolist()
+
+    matches: dict[str, set[str]] = {label: set() for label in _NEWS_PATTERNS}
+    caught: set[str] = set()
+    for url in all_urls:
+        if not url:
+            continue
+        for label, regex in _NEWS_PATTERNS.items():
+            if regex.search(url):
+                matches[label].add(url)
+                caught.add(url)
+                break  # First match wins so each URL counts once
+
+    results = []
+    for label, urls in matches.items():
+        if not urls:
+            continue
+        mask = df["Source"].isin(urls) | df["Destination"].isin(urls)
+        link_count = int(mask.sum())
+        results.append({
+            "label": label,
+            "urls": urls,
+            "url_count": len(urls),
+            "link_count": link_count,
+            "example": min(urls, key=len),
+        })
+    results.sort(key=lambda x: x["url_count"], reverse=True)
+
+    return {"patterns": results, "total_urls": len(caught)}
+
+
+def filter_news_patterns(df: pd.DataFrame, exclude_url_set: set[str]) -> pd.DataFrame:
+    """Remove links where Source or Destination is in the news exclude set."""
+    if not exclude_url_set:
+        return df.copy()
+    mask = df["Source"].isin(exclude_url_set) | df["Destination"].isin(exclude_url_set)
+    return df[~mask].copy()
+
+
 def filter_by_patterns(df: pd.DataFrame, exclude_patterns: list[str]) -> pd.DataFrame:
     """Remove links where Source or Destination matches any excluded pattern.
 

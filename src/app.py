@@ -34,7 +34,16 @@ from src.config import APP_PASSWORD, GEMINI_API_KEY, HEALTH_CRITICAL_MAX, HEALTH
 from src.parsers.screaming_frog import parse_screaming_frog_csv
 from src.parsers.priority_urls import parse_priority_urls_csv
 from src.cleaning.link_position import get_position_summary, filter_by_positions
-from src.cleaning.url_patterns import detect_url_patterns, filter_by_patterns, detect_pagination_urls, filter_pagination, detect_template_links, filter_template_links
+from src.cleaning.url_patterns import (
+    detect_url_patterns, filter_by_patterns,
+    detect_pagination_urls, filter_pagination,
+    detect_template_links, filter_template_links,
+    detect_news_patterns, filter_news_patterns,
+)
+from src.cleaning.language import (
+    detect_languages, filter_by_language, detect_language_switchers, ROOT_KEY,
+)
+from src.analysis.cost_estimator import estimate_cost, format_cost
 from src.analysis.link_audit import compute_link_audit, get_priority_urls_health
 from src.analysis.pagerank import compute_pagerank, get_top_pages, get_pagerank_distribution
 from src.analysis.ai_analyzer import run_ai_analysis, get_token_usage, check_api_health
@@ -99,6 +108,8 @@ def reset_analysis():
         "url_patterns", "position_keep", "pattern_exclude", "exclude_patterns",
         "custom_patterns", "pagination_info", "remove_pagination", "manual_excluded_urls",
         "template_links_info", "template_exclude",
+        "language_info", "selected_language", "step2_lang_cache_key",
+        "news_patterns_info", "news_exclude",
         "audit_results", "pagerank_scores", "ai_results", "cocoon_health_data", "token_usage",
         "ai_health", "market_resolved", "market_detection",
     ]:
@@ -548,6 +559,108 @@ def render_cleaning_step1():
                     st.rerun()
 
 
+def _apply_step2_filters(df: pd.DataFrame, exclude_patterns: list[str]) -> pd.DataFrame:
+    """Apply every Step 2 filter to df in the order they appear in the UI.
+
+    Pre-conditions: df is already language-filtered (the caller passes the
+    rendered Step 2 df, not raw `position_filtered_data`). Filters here are
+    additive — pagination, news, template, URL pattern, manual URL excludes.
+    """
+    cleaned = filter_by_patterns(df, exclude_patterns) if exclude_patterns else df.copy()
+
+    pagination = st.session_state.get("pagination_info") or {}
+    if (
+        st.session_state.get("remove_pagination", False)
+        and pagination.get("count", 0) > 0
+    ):
+        cleaned = filter_pagination(cleaned, pagination["urls"])
+
+    news_info = st.session_state.get("news_patterns_info") or {"patterns": []}
+    news_excl_map = st.session_state.get("news_exclude", {})
+    news_excl_urls: set[str] = set()
+    for pat in news_info.get("patterns", []):
+        if news_excl_map.get(pat["label"], False):
+            news_excl_urls |= pat["urls"]
+    if news_excl_urls:
+        cleaned = filter_news_patterns(cleaned, news_excl_urls)
+
+    template_excl = [
+        p for p, excl in st.session_state.get("template_exclude", {}).items() if excl
+    ]
+    if template_excl:
+        cleaned = filter_template_links(cleaned, template_excl)
+
+    manual_set = st.session_state.get("manual_excluded_urls") or set()
+    if manual_set:
+        mask = cleaned["Source"].isin(manual_set) | cleaned["Destination"].isin(manual_set)
+        cleaned = cleaned[~mask].copy()
+
+    return cleaned
+
+
+def _render_cost_estimate(remaining_url_count: int):
+    """Render the pre-run cost estimate panel above the Run Analysis bar."""
+    from src import config as _config
+    model = _config.GEMINI_MODEL
+    est = estimate_cost(remaining_url_count, model=model)
+
+    cost_str = format_cost(est["total_cost"])
+    cap_note = ""
+    if est["page_cap_applied"]:
+        cap_note = (
+            f"<div style='font-size:12px;color:#94A3B8;margin-top:4px;'>"
+            f"AI page cap is {est['capped_pages']:,} (selected by priority + orphans + top PageRank). "
+            f"The estimate uses the capped count, not the {remaining_url_count:,} total.</div>"
+        )
+
+    unknown_note = ""
+    if not est["is_known_model"]:
+        unknown_note = (
+            "<div style='font-size:12px;color:#FBBF24;margin-top:4px;'>"
+            f"Cost for <code>{model}</code> is extrapolated from the closest known family — "
+            "treat as a rough estimate.</div>"
+        )
+
+    color = "#34D399"  # green by default
+    if est["total_cost"] >= 1:
+        color = "#FBBF24"  # amber when ≥$1
+    if est["total_cost"] >= 5:
+        color = "#F87171"  # red when ≥$5
+
+    st.markdown(
+        f"<div style='border:1px solid rgba(148,163,184,0.2);border-radius:10px;"
+        f"padding:14px 18px;margin:18px 0 6px;background:rgba(15,23,42,0.4);'>"
+        f"<div style='display:flex;justify-content:space-between;align-items:baseline;'>"
+        f"<div>"
+        f"<div style='font-size:13px;color:#94A3B8;text-transform:uppercase;letter-spacing:0.06em;'>"
+        f"Estimated AI cost</div>"
+        f"<div style='font-size:11px;color:#64748B;margin-top:2px;'>"
+        f"{est['capped_pages']:,} pages · {est['total_calls']} API calls · "
+        f"<code>{model}</code></div>"
+        f"</div>"
+        f"<div style='font-size:28px;font-weight:600;color:{color};font-family:JetBrains Mono,monospace;'>"
+        f"~{cost_str}</div>"
+        f"</div>"
+        f"{cap_note}"
+        f"{unknown_note}"
+        f"<div style='font-size:11px;color:#64748B;margin-top:6px;'>"
+        f"Empirical estimate — actual cost can vary ±30%. To lower it: tighten exclusions, "
+        f"pick a smaller language section, or switch to a cheaper model in the AI panel.</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _step2_clear_section_caches():
+    """Clear cached Step 2 detections so they re-run on a re-filtered df."""
+    for k in (
+        "pagination_info", "template_links_info", "template_exclude",
+        "url_patterns", "pattern_exclude", "news_patterns_info", "news_exclude",
+        "manual_excluded_urls",
+    ):
+        st.session_state.pop(k, None)
+
+
 def render_cleaning_step2():
     """Render Step 2 of the cleaning wizard — filter URL patterns."""
     st.markdown(
@@ -563,7 +676,89 @@ def render_cleaning_step2():
         unsafe_allow_html=True,
     )
 
-    df = st.session_state.position_filtered_data
+    raw_df = st.session_state.position_filtered_data
+
+    # ---- Language detection + selector (Phase 11 / A4) ------------------------
+    # Detect once per session and cache. The detection result holds a url -> lang
+    # map we reuse for fast filtering and language-switcher detection.
+    if "language_info" not in st.session_state:
+        st.session_state.language_info = detect_languages(raw_df)
+
+    lang_info = st.session_state.language_info
+    detected_langs = lang_info["languages"]
+    root_section = lang_info["root"]
+
+    multilingual = len(detected_langs) >= 2 or (len(detected_langs) >= 1 and root_section)
+
+    if multilingual:
+        st.markdown("#### Language section", unsafe_allow_html=True)
+        st.markdown(
+            "<p style='color:#94A3B8;font-size:14px;margin-bottom:12px;'>"
+            "Your site has multiple language sections. Pick one to analyze. "
+            "<span style='color:#64748B;'>(Phase B will support running all languages in one pass.)</span></p>",
+            unsafe_allow_html=True,
+        )
+
+        options: list[tuple[str, str]] = []  # (code, display label)
+        for lang in detected_langs:
+            display = (
+                f"{lang['label']} — {lang['page_count']:,} pages, "
+                f"{lang['link_count']:,} links"
+            )
+            options.append((lang["code"], display))
+        if root_section:
+            display = (
+                f"{root_section['label']} — {root_section['page_count']:,} pages, "
+                f"{root_section['link_count']:,} links"
+            )
+            options.append((ROOT_KEY, display))
+
+        # Default to the largest section the first time we render.
+        if "selected_language" not in st.session_state or st.session_state.selected_language is None:
+            st.session_state.selected_language = options[0][0]
+
+        codes = [c for c, _ in options]
+        labels = [l for _, l in options]
+        try:
+            current_idx = codes.index(st.session_state.selected_language)
+        except ValueError:
+            current_idx = 0
+            st.session_state.selected_language = codes[0]
+
+        chosen_label = st.selectbox(
+            "Pick a language section",
+            options=labels,
+            index=current_idx,
+            key="language_selector",
+            label_visibility="collapsed",
+        )
+        chosen_code = codes[labels.index(chosen_label)]
+
+        if chosen_code != st.session_state.selected_language:
+            st.session_state.selected_language = chosen_code
+            _step2_clear_section_caches()
+            st.rerun()
+
+        st.markdown("<br>", unsafe_allow_html=True)
+    else:
+        # Single-language site — no selector needed, but keep state consistent.
+        if detected_langs:
+            st.session_state.selected_language = detected_langs[0]["code"]
+        elif root_section:
+            st.session_state.selected_language = ROOT_KEY
+        else:
+            st.session_state.selected_language = None
+
+    # Apply the language filter so every downstream detector runs on the
+    # selected section only (cocoon detection, news, template, patterns).
+    if st.session_state.get("selected_language"):
+        df = filter_by_language(
+            raw_df,
+            st.session_state.selected_language,
+            url_lang_map=lang_info["url_lang_map"],
+        )
+    else:
+        df = raw_df
 
     # ---- Pagination detection ----
     if "pagination_info" not in st.session_state:
@@ -606,8 +801,47 @@ def render_cleaning_step2():
         st.markdown("<br>", unsafe_allow_html=True)
 
     # ---- Template link detection (false "Content" links) ----
+    # Note: language-switcher detection (A5) runs on the *raw* (pre-language-filter)
+    # df — switcher links typically point cross-language and would disappear from
+    # `df` after filter_by_language. The result is merged into the template list so
+    # the switcher path is excluded *before* the language filter (which is fine —
+    # exclude_patterns / template filtering apply to raw_df at Run-Analysis time).
     if "template_links_info" not in st.session_state:
-        st.session_state.template_links_info = detect_template_links(df)
+        tpl = detect_template_links(df)
+        switchers = []
+        if multilingual:
+            lang_codes = [l["code"] for l in detected_langs]
+            switchers = detect_language_switchers(raw_df, lang_codes)
+        existing_paths = {p["path"] for p in tpl["paths"]}
+        switcher_paths = set()
+        for sw in switchers:
+            switcher_paths.add(sw["path"])
+            if sw["path"] in existing_paths:
+                # Tag the existing entry so the UI shows the switcher badge
+                for p in tpl["paths"]:
+                    if p["path"] == sw["path"]:
+                        p["is_language_switcher"] = True
+                        p["target_languages"] = sw["target_languages"]
+                        break
+            else:
+                # Path didn't qualify under generic template thresholds — add it
+                tpl["paths"].append({
+                    "path": sw["path"],
+                    "anchors": [],
+                    "destinations": sw["destinations"][:2],
+                    "page_count": sw["page_count"],
+                    "page_ratio": sw["page_ratio"],
+                    "link_count": sw["link_count"],
+                    "is_language_switcher": True,
+                    "target_languages": sw["target_languages"],
+                })
+                tpl["total_links"] += sw["link_count"]
+                tpl["total_paths"] += 1
+        # Sort: switchers first (they're the most confident exclude), then by page count
+        tpl["paths"].sort(
+            key=lambda p: (not p.get("is_language_switcher", False), -p["page_count"])
+        )
+        st.session_state.template_links_info = tpl
     if "template_exclude" not in st.session_state:
         st.session_state.template_exclude = {
             p["path"]: True for p in st.session_state.template_links_info["paths"]
@@ -642,7 +876,20 @@ def render_cleaning_step2():
             with col2:
                 anchors_preview = ", ".join(f'"{a}"' for a in path_info["anchors"][:3] if a)
                 dest_preview = path_info["destinations"][0] if path_info["destinations"] else ""
+                switcher_badge = ""
+                if path_info.get("is_language_switcher"):
+                    targets = path_info.get("target_languages", [])
+                    targets_str = ", ".join(f"/{c}/" for c in targets[:6])
+                    if len(targets) > 6:
+                        targets_str += f", +{len(targets) - 6} more"
+                    switcher_badge = (
+                        "<span style='display:inline-block;background:rgba(45,212,191,0.14);"
+                        "border:1px solid rgba(45,212,191,0.4);color:#5EEAD4;font-size:11px;"
+                        "padding:1px 8px;border-radius:4px;margin-bottom:4px;font-weight:600;'>"
+                        f"Language switcher → {targets_str}</span><br>"
+                    )
                 st.markdown(
+                    f"{switcher_badge}"
                     f"<div style='font-family:JetBrains Mono,monospace;font-size:12px;color:#F0F4F8;"
                     f"word-break:break-all;'>{path}</div>"
                     f"<div style='font-size:12px;color:#64748B;margin-top:2px;'>"
@@ -660,6 +907,52 @@ def render_cleaning_step2():
                 )
         st.markdown("<br>", unsafe_allow_html=True)
 
+    # ---- News / timely URL detection (Phase 11 / A6) --------------------------
+    if "news_patterns_info" not in st.session_state:
+        st.session_state.news_patterns_info = detect_news_patterns(df)
+    if "news_exclude" not in st.session_state:
+        st.session_state.news_exclude = {
+            p["label"]: True for p in st.session_state.news_patterns_info["patterns"]
+        }
+    news_info = st.session_state.news_patterns_info
+    if news_info["patterns"]:
+        st.markdown("#### News / timely content", unsafe_allow_html=True)
+        st.markdown(
+            f"<p style='color:#94A3B8;font-size:14px;margin-bottom:6px;'>"
+            f"Found <strong style='color:#FFFFFF;'>{news_info['total_urls']:,}</strong> "
+            f"time-sensitive URLs (news, match coverage, blog posts, dated slugs). "
+            f"These usually shouldn't anchor evergreen linking.</p>"
+            f"<p style='color:#94A3B8;font-size:13px;margin-bottom:12px;'>"
+            f"Check = exclude from analysis. Uncheck if a section is actually evergreen.</p>",
+            unsafe_allow_html=True,
+        )
+        for idx, pat in enumerate(news_info["patterns"]):
+            label = pat["label"]
+            default_exclude = st.session_state.news_exclude.get(label, True)
+            col1, col2, col3 = st.columns([0.5, 4, 1.2])
+            with col1:
+                st.session_state.news_exclude[label] = st.checkbox(
+                    "Exclude",
+                    value=default_exclude,
+                    key=f"news_{idx}",
+                    label_visibility="collapsed",
+                )
+            with col2:
+                st.markdown(
+                    f"<div style='font-family:JetBrains Mono,monospace;font-size:13px;color:#F0F4F8;'>"
+                    f"{label}</div>"
+                    f"<div style='font-size:12px;color:#64748B;margin-top:2px;word-break:break-all;'>"
+                    f"e.g. {pat['example']}</div>",
+                    unsafe_allow_html=True,
+                )
+            with col3:
+                st.markdown(
+                    f"<span style='color:#94A3B8;font-size:13px;'>"
+                    f"{pat['url_count']:,} URLs<br>{pat['link_count']:,} links</span>",
+                    unsafe_allow_html=True,
+                )
+        st.markdown("<br>", unsafe_allow_html=True)
+
     # Detect patterns (cached)
     if "url_patterns" not in st.session_state:
         st.session_state.url_patterns = detect_url_patterns(df)
@@ -668,6 +961,10 @@ def render_cleaning_step2():
 
     if patterns_df.empty:
         st.info("No recurring URL patterns detected. All links will be included.")
+        # Show the cost estimate even when no URL patterns exist (language /
+        # news / template exclusions still affect the page count)
+        unique_pages_count = pd.concat([df["Source"], df["Destination"]]).nunique()
+        _render_cost_estimate(unique_pages_count)
         with st._bottom:
             bar_cols = st.columns([1, 3])
             with bar_cols[0]:
@@ -676,10 +973,7 @@ def render_cleaning_step2():
                     st.rerun()
             with bar_cols[1]:
                 if st.button("Run Analysis →", key="step2_empty_next", use_container_width=True):
-                    cleaned = df
-                    template_excl = [p for p, excl in st.session_state.get("template_exclude", {}).items() if excl]
-                    if template_excl:
-                        cleaned = filter_template_links(cleaned, template_excl)
+                    cleaned = _apply_step2_filters(df, [])
                     st.session_state.cleaned_data = cleaned
                     _start_analysis()
         return
@@ -833,6 +1127,14 @@ def render_cleaning_step2():
         pagination_set = pagination["urls"]
         all_urls = [u for u in all_urls if u not in pagination_set]
 
+    # Apply news/timely exclusions
+    news_exclude_urls: set[str] = set()
+    for pat in news_info["patterns"]:
+        if st.session_state.news_exclude.get(pat["label"], False):
+            news_exclude_urls |= pat["urls"]
+    if news_exclude_urls:
+        all_urls = [u for u in all_urls if u not in news_exclude_urls]
+
     # Apply manual URL exclusions from the browser
     if "manual_excluded_urls" not in st.session_state:
         st.session_state.manual_excluded_urls = set()
@@ -902,9 +1204,8 @@ def render_cleaning_step2():
                     st.session_state.manual_excluded_urls = manual_excluded | selected
                     st.rerun()
 
-    # ---- Summary ----
-    exclude_link_count = patterns_df[patterns_df["Pattern"].isin(exclude_patterns)]["Links"].sum()
-    pagination_links = pagination["link_count"] if st.session_state.get("remove_pagination", False) and pagination["count"] > 0 else 0
+    # ---- Pre-run cost estimate (Phase 11 / A3) -------------------------------
+    _render_cost_estimate(len(all_urls))
 
     # Sticky bottom action bar
     with st._bottom:
@@ -915,19 +1216,7 @@ def render_cleaning_step2():
                 st.rerun()
         with bar_cols[1]:
             if st.button("Run Analysis →", key="step2_next", use_container_width=True):
-                cleaned = filter_by_patterns(df, exclude_patterns)
-                # Apply pagination filter
-                if st.session_state.get("remove_pagination", False) and pagination["count"] > 0:
-                    cleaned = filter_pagination(cleaned, pagination["urls"])
-                # Apply template link filter (false "Content" links)
-                template_excl = [p for p, excl in st.session_state.get("template_exclude", {}).items() if excl]
-                if template_excl:
-                    cleaned = filter_template_links(cleaned, template_excl)
-                # Apply manual URL exclusions (remove links involving these URLs)
-                if st.session_state.manual_excluded_urls:
-                    manual_set = st.session_state.manual_excluded_urls
-                    mask = cleaned["Source"].isin(manual_set) | cleaned["Destination"].isin(manual_set)
-                    cleaned = cleaned[~mask].copy()
+                cleaned = _apply_step2_filters(df, exclude_patterns)
                 st.session_state.cleaned_data = cleaned
                 st.session_state.exclude_patterns = exclude_patterns
                 _start_analysis()
@@ -1711,11 +2000,7 @@ def render_results():
             unsafe_allow_html=True,
         )
 
-    # ---- CSV Download ----
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("---")
-    st.markdown("<br>", unsafe_allow_html=True)
-
+    # ---- Downloads (rendered in sticky st._bottom below) ----
     recommendations = ai_results.get("recommendations", []) if ai_results else []
 
     csv_orphans = set(audit.get("orphan_pages", [])) | set(audit.get("true_orphan_pages", []))
@@ -1755,23 +2040,24 @@ def render_results():
         token_usage=st.session_state.get("token_usage"),
     )
 
-    dl_csv, dl_html = st.columns(2)
-    with dl_csv:
-        st.download_button(
-            label="Download Linking Plan (CSV)",
-            data=csv_content,
-            file_name=f"{base_name}-linking-plan.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-    with dl_html:
-        st.download_button(
-            label="Download Full Report (HTML)",
-            data=html_content,
-            file_name=f"{base_name}-report.html",
-            mime="text/html",
-            use_container_width=True,
-        )
+    with st._bottom:
+        dl_csv, dl_html = st.columns(2)
+        with dl_csv:
+            st.download_button(
+                label="Download Linking Plan (CSV)",
+                data=csv_content,
+                file_name=f"{base_name}-linking-plan.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+        with dl_html:
+            st.download_button(
+                label="Download Full Report (HTML)",
+                data=html_content,
+                file_name=f"{base_name}-report.html",
+                mime="text/html",
+                use_container_width=True,
+            )
 
 
 # ============================================================
@@ -1834,9 +2120,9 @@ def main():
                 model_input = st.text_input(
                     "Model ID",
                     value=current_model,
-                    placeholder="gemini-3.1-pro-preview",
+                    placeholder="gemini-3.1-flash-lite-preview",
                     label_visibility="collapsed",
-                    help="Dev only — override the Gemini model ID. Verify with Google's docs before swapping.",
+                    help="Dev only — override the Gemini model ID. Default is Flash-Lite Preview (cheap). Opt-in upgrades: gemini-3-flash-preview (more capable), gemini-3.1-pro-preview (premium, expensive). Verify IDs with Google's docs before swapping.",
                 )
         with btn_col:
             if st.button("Connect", use_container_width=True):

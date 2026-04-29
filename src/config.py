@@ -5,10 +5,13 @@ import os
 # Gemini API
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 # Override at runtime with GEMINI_MODEL env var or via the UI (AI config panel).
-# Verified IDs (Apr 2026): "gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.1-pro-preview".
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-pro-preview")
-# Max output tokens — Gemini 3.1 Pro Preview supports up to 65,536; 2.5 Flash up to 16,384.
-GEMINI_MAX_OUTPUT_TOKENS = int(os.environ.get("GEMINI_MAX_OUTPUT_TOKENS", "32768"))
+# Verified IDs (Apr 2026): "gemini-3.1-flash-lite-preview" (default, cheap), "gemini-3-flash-preview",
+# "gemini-3.1-pro-preview" (premium, expensive — thinking required), "gemini-2.5-flash" (legacy GA).
+# Default chosen 2026-04-29 after cost incident — see APIS.md for context.
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite-preview")
+# Max output tokens — lowered 32K → 8K after 2026-04-29 cost incident on 3.1 Pro Preview.
+# 3.1 Flash-Lite supports up to 65,536; 8K is plenty for our batch sizes and caps thinking output.
+GEMINI_MAX_OUTPUT_TOKENS = int(os.environ.get("GEMINI_MAX_OUTPUT_TOKENS", "8192"))
 
 # Dev-only UI toggles. Set ILA_DEV_MODE=1 in local .streamlit/secrets.toml to expose
 # the model picker (for A/B testing). Production / Streamlit Cloud leaves it unset.
