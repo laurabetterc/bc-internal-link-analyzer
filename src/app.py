@@ -651,13 +651,65 @@ def _render_cost_estimate(remaining_url_count: int):
     )
 
 
+def _bulk_set_step2_excludes(dict_name: str, items: list[tuple[str, str]], value: bool):
+    """Set every item's exclude flag to `value` in one batch.
+
+    items: list of (item_id, widget_key) pairs — `item_id` is the dict key
+    (an XPath, news label, or URL pattern) and `widget_key` is the per-row
+    checkbox key. Both need to be updated so the next render shows the new
+    state instead of the user's previous per-checkbox value.
+    """
+    d = st.session_state.get(dict_name, {})
+    for item_id, widget_key in items:
+        d[item_id] = value
+        st.session_state[widget_key] = value
+    st.session_state[dict_name] = d
+
+
+def _bulk_toggle_row(prefix: str, items: list[tuple[str, str]], dict_name: str):
+    """Render the 'Exclude all' / 'Include all' buttons for a Step 2 section."""
+    col_a, col_b, _ = st.columns([1, 1, 4])
+    with col_a:
+        st.button(
+            "Exclude all",
+            key=f"{prefix}_exclude_all",
+            on_click=_bulk_set_step2_excludes,
+            args=(dict_name, items, True),
+            use_container_width=True,
+        )
+    with col_b:
+        st.button(
+            "Include all",
+            key=f"{prefix}_include_all",
+            on_click=_bulk_set_step2_excludes,
+            args=(dict_name, items, False),
+            type="tertiary",
+            use_container_width=True,
+        )
+
+
 def _step2_clear_section_caches():
-    """Clear cached Step 2 detections so they re-run on a re-filtered df."""
+    """Clear cached Step 2 detections so they re-run on a re-filtered df.
+
+    Also clears the per-row checkbox widget keys (`tpl_*`, `news_*`, `pat_*`)
+    — otherwise an unchecked state from the previous language would override
+    the new language's `value=` default and silently invert the user's intent.
+    """
     for k in (
         "pagination_info", "template_links_info", "template_exclude",
         "url_patterns", "pattern_exclude", "news_patterns_info", "news_exclude",
         "manual_excluded_urls",
     ):
+        st.session_state.pop(k, None)
+    for k in [
+        k for k in list(st.session_state.keys())
+        if k.startswith(("tpl_", "news_", "pat_"))
+        and k not in (
+            "tpl_exclude_all", "tpl_include_all",
+            "news_exclude_all", "news_include_all",
+            "pat_exclude_all", "pat_include_all",
+        )
+    ]:
         st.session_state.pop(k, None)
 
 
@@ -862,6 +914,12 @@ def render_cleaning_step2():
             unsafe_allow_html=True,
         )
 
+        _tpl_items = [
+            (p["path"], f"tpl_{idx}")
+            for idx, p in enumerate(template_info["paths"])
+        ]
+        _bulk_toggle_row("tpl", _tpl_items, "template_exclude")
+
         for idx, path_info in enumerate(template_info["paths"]):
             path = path_info["path"]
             default_exclude = st.session_state.template_exclude.get(path, True)
@@ -926,6 +984,13 @@ def render_cleaning_step2():
             f"Check = exclude from analysis. Uncheck if a section is actually evergreen.</p>",
             unsafe_allow_html=True,
         )
+
+        _news_items = [
+            (pat["label"], f"news_{idx}")
+            for idx, pat in enumerate(news_info["patterns"])
+        ]
+        _bulk_toggle_row("news", _news_items, "news_exclude")
+
         for idx, pat in enumerate(news_info["patterns"]):
             label = pat["label"]
             default_exclude = st.session_state.news_exclude.get(label, True)
@@ -990,6 +1055,12 @@ def render_cleaning_step2():
         "Check = exclude from analysis. Typical excludes: pagination, tags, author pages, categories.</p>",
         unsafe_allow_html=True,
     )
+
+    _pat_items = [
+        (row["Pattern"], f"pat_{row['Pattern']}")
+        for _, row in patterns_df.iterrows()
+    ]
+    _bulk_toggle_row("pat", _pat_items, "pattern_exclude")
 
     for _, row in patterns_df.iterrows():
         pattern = row["Pattern"]
