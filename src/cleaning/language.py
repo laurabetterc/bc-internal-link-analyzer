@@ -1,4 +1,12 @@
-"""Language detection and filtering for multilingual sites (Phase 11 / A4 + A5)."""
+"""Section detection and filtering for multilingual / multi-country sites (Phase 11 / A4 + A5).
+
+Despite the module name "language" (kept for backward compatibility), this module
+recognizes BOTH ISO 639-1 language codes (`/it/`, `/es/`) and ISO 3166-1 alpha-2
+country codes (`/mx/`, `/br/`, `/uk/`). Many BC sites segment by country rather
+than language (bolavip uses `/mx/`, `/ar/`, `/co/`); aceodds segments by language.
+The detector treats any matching first-path-segment as a "section" — the UI labels
+each section with whatever display name we have (language / country / both).
+"""
 
 import re
 from urllib.parse import urlparse
@@ -7,12 +15,11 @@ import pandas as pd
 
 
 # ISO 639-1 two-letter language codes (full set per the standard).
-# Restricted to two-letter codes used as URL path prefixes by BC and competitor sites.
 ISO_639_1_CODES = frozenset({
     "ab", "aa", "af", "ak", "sq", "am", "ar", "an", "hy", "as", "av", "ae",
     "ay", "az", "bm", "ba", "eu", "be", "bn", "bh", "bi", "bs", "br", "bg",
     "my", "ca", "ch", "ce", "ny", "zh", "cv", "kw", "co", "cr", "hr", "cs",
-    "da", "dv", "nl", "dz", "en", "eo", "et", "ee", "fo", "fj", "fi", "fr",
+    "da", "dv", "nl", "dz", "en", "eo", "es", "et", "ee", "fo", "fj", "fi", "fr",
     "ff", "gl", "ka", "de", "el", "gn", "gu", "ht", "ha", "he", "hz", "hi",
     "ho", "hu", "ia", "id", "ie", "ga", "ig", "ik", "io", "is", "it", "iu",
     "ja", "jv", "kl", "kn", "kr", "ks", "kk", "km", "ki", "rw", "ky", "kv",
@@ -21,13 +28,42 @@ ISO_639_1_CODES = frozenset({
     "nv", "nd", "ne", "ng", "nb", "nn", "no", "ii", "nr", "oc", "oj", "cu",
     "om", "or", "os", "pa", "pi", "fa", "pl", "ps", "pt", "qu", "rm", "rn",
     "ro", "ru", "sa", "sc", "sd", "se", "sm", "sg", "sr", "gd", "sn", "si",
-    "sk", "sl", "so", "st", "su", "sv", "sw", "ta", "te", "tg", "th", "ti",
+    "sk", "sl", "so", "ss", "st", "su", "sv", "sw", "ta", "te", "tg", "th", "ti",
     "bo", "tk", "tl", "tn", "to", "tr", "ts", "tt", "tw", "ty", "ug", "uk",
     "ur", "uz", "ve", "vi", "vo", "wa", "cy", "wo", "fy", "xh", "yi", "yo",
     "za", "zu",
 })
 
-# Display names for the most common BC markets — fallback to the raw code otherwise.
+# ISO 3166-1 alpha-2 country codes (full set). `uk` isn't standard (the ISO code is `gb`)
+# but every BC site uses `uk` for the United Kingdom in URLs, so we accept both.
+ISO_3166_1_CODES = frozenset({
+    "af", "al", "dz", "as", "ad", "ao", "ai", "aq", "ag", "ar", "am", "aw",
+    "au", "at", "az", "bs", "bh", "bd", "bb", "by", "be", "bz", "bj", "bm",
+    "bt", "bo", "ba", "bw", "br", "bn", "bg", "bf", "bi", "kh", "cm", "ca",
+    "cv", "ky", "cf", "td", "cl", "cn", "cx", "cc", "co", "km", "cg", "cd",
+    "ck", "cr", "ci", "hr", "cu", "cy", "cz", "dk", "dj", "dm", "do", "ec",
+    "eg", "sv", "gq", "er", "ee", "et", "fk", "fo", "fj", "fi", "fr", "gf",
+    "pf", "ga", "gm", "ge", "de", "gh", "gi", "gr", "gl", "gd", "gp", "gu",
+    "gt", "gn", "gw", "gy", "ht", "va", "hn", "hk", "hu", "is", "in", "id",
+    "ir", "iq", "ie", "il", "it", "jm", "jp", "jo", "kz", "ke", "ki", "kp",
+    "kr", "kw", "kg", "la", "lv", "lb", "ls", "lr", "ly", "li", "lt", "lu",
+    "mo", "mk", "mg", "mw", "my", "mv", "ml", "mt", "mh", "mq", "mr", "mu",
+    "mx", "fm", "md", "mc", "mn", "me", "ms", "ma", "mz", "mm", "na", "nr",
+    "np", "nl", "nc", "nz", "ni", "ne", "ng", "nu", "nf", "mp", "no", "om",
+    "pk", "pw", "ps", "pa", "pg", "py", "pe", "ph", "pn", "pl", "pt", "pr",
+    "qa", "re", "ro", "ru", "rw", "sh", "kn", "lc", "pm", "vc", "ws", "sm",
+    "st", "sa", "sn", "rs", "sc", "sl", "sg", "sk", "si", "sb", "so", "za",
+    "gs", "es", "lk", "sd", "sr", "sj", "sz", "se", "ch", "sy", "tw", "tj",
+    "tz", "th", "tl", "tg", "tk", "to", "tt", "tn", "tr", "tm", "tc", "tv",
+    "ug", "ua", "ae", "gb", "us", "um", "uy", "uz", "vu", "ve", "vn", "vg",
+    "vi", "wf", "eh", "ye", "zm", "zw",
+    "uk",  # informal, not strictly ISO but ubiquitous in URL prefixes
+})
+
+# Codes recognized as URL section prefixes (union of language + country).
+RECOGNIZED_CODES = ISO_639_1_CODES | ISO_3166_1_CODES
+
+# Display names for languages (most common BC markets — fallback to raw code otherwise).
 LANG_DISPLAY = {
     "en": "English", "es": "Spanish", "pt": "Portuguese", "fr": "French",
     "de": "German", "it": "Italian", "nl": "Dutch", "ru": "Russian",
@@ -41,16 +77,45 @@ LANG_DISPLAY = {
     "sl": "Slovenian", "ka": "Georgian",
 }
 
+# Display names for countries (focused on BC markets — others fall back to raw code).
+COUNTRY_DISPLAY = {
+    # Americas
+    "us": "United States", "ca": "Canada",
+    "mx": "Mexico", "br": "Brazil", "ar": "Argentina", "co": "Colombia",
+    "cl": "Chile", "pe": "Peru", "ve": "Venezuela", "uy": "Uruguay",
+    "ec": "Ecuador", "bo": "Bolivia", "py": "Paraguay",
+    # Europe
+    "uk": "United Kingdom", "gb": "United Kingdom", "ie": "Ireland",
+    "es": "Spain", "fr": "France", "de": "Germany", "it": "Italy",
+    "pt": "Portugal", "nl": "Netherlands", "be": "Belgium", "ch": "Switzerland",
+    "at": "Austria", "gr": "Greece", "pl": "Poland", "ro": "Romania",
+    "cz": "Czech Republic", "sk": "Slovakia", "hu": "Hungary",
+    "dk": "Denmark", "se": "Sweden", "no": "Norway", "fi": "Finland",
+    "is": "Iceland", "ee": "Estonia", "lv": "Latvia", "lt": "Lithuania",
+    "si": "Slovenia", "hr": "Croatia", "rs": "Serbia", "ba": "Bosnia",
+    "bg": "Bulgaria", "ua": "Ukraine", "ru": "Russia", "tr": "Turkey",
+    # Africa
+    "za": "South Africa", "ng": "Nigeria", "ke": "Kenya", "gh": "Ghana",
+    "tz": "Tanzania", "ug": "Uganda", "ma": "Morocco", "eg": "Egypt",
+    # Asia / Oceania
+    "au": "Australia", "nz": "New Zealand",
+    "jp": "Japan", "kr": "South Korea", "cn": "China", "in": "India",
+    "th": "Thailand", "vn": "Vietnam", "id": "Indonesia", "my": "Malaysia",
+    "ph": "Philippines", "sg": "Singapore", "hk": "Hong Kong",
+}
+
 ROOT_KEY = "(root)"
 
 _LOCALE_RE = re.compile(r"^([a-z]{2})-[a-z]{2}$")
 
 
 def extract_lang_segment(url: str) -> str | None:
-    """Return the language code from the first path segment, or None if not a known language.
+    """Return the section code from the first path segment, or None if not recognized.
 
-    Recognizes plain ISO 639-1 codes ('it', 'pt') and locale variants ('pt-br', 'en-us')
-    as long as the leading 2-letter prefix is a known ISO code.
+    Recognizes plain 2-letter codes from ISO 639-1 (languages) OR ISO 3166-1
+    (countries), and locale variants ('pt-br', 'en-us') where the leading
+    2-letter prefix is a known code. Function name kept for backward compatibility
+    — semantically this is "extract section code".
     """
     if not url:
         return None
@@ -62,26 +127,26 @@ def extract_lang_segment(url: str) -> str | None:
     if not parts:
         return None
     seg = parts[0].lower()
-    if len(seg) == 2 and seg in ISO_639_1_CODES:
+    if len(seg) == 2 and seg in RECOGNIZED_CODES:
         return seg
     m = _LOCALE_RE.match(seg)
-    if m and m.group(1) in ISO_639_1_CODES:
+    if m and m.group(1) in RECOGNIZED_CODES:
         return seg
     return None
 
 
 def _build_url_lang_map(df: pd.DataFrame) -> dict[str, str | None]:
-    """Compute language for every unique URL once (avoids repeated urlparse on large frames)."""
+    """Compute section code for every unique URL once (avoids repeated urlparse on large frames)."""
     unique_urls = pd.unique(pd.concat([df["Source"], df["Destination"]]))
     return {url: extract_lang_segment(url) for url in unique_urls}
 
 
 def detect_languages(df: pd.DataFrame, min_pages: int = 10) -> dict:
-    """Detect language sections by ISO 639-1 first-path-segment.
+    """Detect URL sections by first-path-segment (ISO 639-1 language OR ISO 3166-1 country).
 
-    Pages without a language prefix go in the 'root' bucket (typically English on BC sites).
-    Languages with fewer than min_pages pages are dropped (avoids false positives from
-    accidental 2-letter slugs like '/it' as a campaign tag).
+    Pages without a recognized prefix go in the 'root' bucket (typically the default
+    market on BC sites). Sections with fewer than min_pages pages are dropped (avoids
+    false positives from accidental 2-letter slugs).
 
     Returns:
         dict with:
@@ -138,9 +203,41 @@ def detect_languages(df: pd.DataFrame, min_pages: int = 10) -> dict:
 
 
 def _label_for(code: str) -> str:
-    base = code.split("-")[0]
-    name = LANG_DISPLAY.get(base, code.upper())
-    return f"{name} (/{code}/)"
+    """Build a display label for a section code.
+
+    For locale-style codes (`pt-br`), the country-suffix wins (clearer signal
+    of intent: "Brazilian Portuguese" → label as Brazil). For pure 2-letter
+    codes, prefer country if known and recognized as ISO 3166, then language.
+    Codes that match both (es, fr, de, …) get a combined label so the user
+    isn't misled.
+    """
+    parts = code.split("-")
+    base = parts[0]
+
+    # Locale form: pt-br → "Brazil – Portuguese (/pt-br/)"
+    if len(parts) == 2:
+        suffix = parts[1]
+        country = COUNTRY_DISPLAY.get(suffix, suffix.upper())
+        lang = LANG_DISPLAY.get(base, base.upper())
+        return f"{country} – {lang} (/{code}/)"
+
+    in_lang = base in ISO_639_1_CODES
+    in_country = base in ISO_3166_1_CODES
+    lang_name = LANG_DISPLAY.get(base)
+    country_name = COUNTRY_DISPLAY.get(base)
+
+    if in_country and country_name and not lang_name:
+        return f"{country_name} (/{code}/)"
+    if in_lang and lang_name and not country_name:
+        return f"{lang_name} (/{code}/)"
+    if country_name and lang_name and country_name != lang_name:
+        # Both interpretations are common — surface both so the user picks correctly.
+        return f"{country_name} / {lang_name} (/{code}/)"
+    if country_name:
+        return f"{country_name} (/{code}/)"
+    if lang_name:
+        return f"{lang_name} (/{code}/)"
+    return f"/{code}/"
 
 
 def _shortest(urls: set[str]) -> str:

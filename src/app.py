@@ -743,11 +743,11 @@ def render_cleaning_step2():
     multilingual = len(detected_langs) >= 2 or (len(detected_langs) >= 1 and root_section)
 
     if multilingual:
-        st.markdown("#### Language section", unsafe_allow_html=True)
+        st.markdown("#### Site section", unsafe_allow_html=True)
         st.markdown(
             "<p style='color:#94A3B8;font-size:14px;margin-bottom:12px;'>"
-            "Your site has multiple language sections. Pick one to analyze. "
-            "<span style='color:#64748B;'>(Phase B will support running all languages in one pass.)</span></p>",
+            "Your site has multiple sections (by language or country). Pick one to analyze. "
+            "<span style='color:#64748B;'>(Phase B will support running all sections in one pass.)</span></p>",
             unsafe_allow_html=True,
         )
 
