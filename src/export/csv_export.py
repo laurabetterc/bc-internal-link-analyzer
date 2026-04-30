@@ -4,12 +4,21 @@ from io import StringIO
 
 import pandas as pd
 
+from src.cleaning.language import extract_lang_segment
+
+
+def _section_label(url: str) -> str:
+    """Render a section code for a URL ('/it/', '/mx/', '(root)' for no prefix)."""
+    code = extract_lang_segment(url or "")
+    return f"/{code}/" if code else "(root)"
+
 
 def generate_linking_plan_csv(
     cleaned_df: pd.DataFrame,
     recommendations: list[dict],
     orphan_urls: set[str] | None = None,
     priority_urls: set[str] | None = None,
+    redirect_candidates: list[dict] | None = None,
 ) -> str:
     """Generate the linking plan as a CSV string.
 
@@ -17,7 +26,11 @@ def generate_linking_plan_csv(
     - Existing links with status "live"
     - AI recommended links with status "to add"
 
-    Columns: Source URL, Target URL, Anchor, Status, Target Status, Score, Priority, Reason
+    Columns: Source URL, Target URL, Anchor, Status, Target Status, Section,
+    Score, Priority, Reason. The Section column shows the URL section
+    (language / country prefix). After Phase A's intra-section filter and
+    Phase B6's cross-section block, source and target always share a section
+    — so one column is enough.
     """
     orphans = orphan_urls or set()
     priorities = priority_urls or set()
@@ -48,12 +61,14 @@ def generate_linking_plan_csv(
     # All existing links from cleaned data (status: "live")
     for _, link_row in cleaned_df.iterrows():
         target = link_row["Destination"]
+        source = link_row["Source"]
         rows.append({
-            "Source URL": link_row["Source"],
+            "Source URL": source,
             "Target URL": target,
             "Anchor": link_row.get("Anchor", ""),
             "Status": "live",
             "Target Status": _target_status(target, False),
+            "Section": _section_label(source),
             "Score": "",
             "Priority": "",
             "Reason": "",
@@ -62,25 +77,47 @@ def generate_linking_plan_csv(
     # AI recommendations (status: "to add")
     for rec in recommendations:
         target = rec.get("target_url", "")
+        source = rec.get("source_url", "")
         target_status_val = _target_status(target, bool(rec.get("is_fallback")))
         rows.append({
-            "Source URL": rec.get("source_url", ""),
+            "Source URL": source,
             "Target URL": target,
             "Anchor": rec.get("suggested_anchor", ""),
             "Status": "to add",
             "Target Status": target_status_val,
+            "Section": _section_label(source),
             "Score": int(rec.get("relevance_score", 0)),
             "Priority": rec.get("priority", ""),
             "Reason": _tagged_reason(rec, target_status_val),
         })
 
+    # C3 — recurring-event 301 redirect candidates
+    for cand in (redirect_candidates or []):
+        past = cand.get("past_url", "")
+        current = cand.get("current_url", "")
+        rows.append({
+            "Source URL": past,
+            "Target URL": current,
+            "Anchor": "",
+            "Status": "301 candidate",
+            "Target Status": "Redirect",
+            "Section": _section_label(past),
+            "Score": "",
+            "Priority": "",
+            "Reason": (
+                f"Past edition of recurring series "
+                f"'{cand.get('series', '')}' ({cand.get('past_year', '')}) — "
+                f"301-redirect to current edition ({cand.get('current_year', '')})."
+            ),
+        })
+
     df = pd.DataFrame(
         rows,
-        columns=["Source URL", "Target URL", "Anchor", "Status", "Target Status", "Score", "Priority", "Reason"],
+        columns=["Source URL", "Target URL", "Anchor", "Status", "Target Status", "Section", "Score", "Priority", "Reason"],
     )
 
-    # Sort: "to add" first (actionable), then "live"
-    status_order = {"to add": 0, "live": 1}
+    # Sort: 301 candidates first (highest urgency), then "to add", then "live"
+    status_order = {"301 candidate": 0, "to add": 1, "live": 2}
     df["_sort"] = df["Status"].map(status_order)
     df = df.sort_values(["_sort", "Target URL", "Source URL"]).drop(columns=["_sort"])
 

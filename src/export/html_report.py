@@ -62,6 +62,7 @@ def generate_html_report(
     cocoon_health_df: pd.DataFrame | None,
     recommendations: list[dict],
     token_usage: dict | None,
+    redirect_candidates: list[dict] | None = None,
 ) -> str:
     """Generate a self-contained HTML report with all analysis results.
 
@@ -214,15 +215,23 @@ def generate_html_report(
             return base
 
         priority_icons = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+        from src.cleaning.language import extract_lang_segment as _section_code
+
+        def _section(url: str) -> str:
+            c = _section_code(url or "")
+            return f"/{c}/" if c else "(root)"
+
         rec_rows = []
         for rec in recommendations:
+            source = rec.get("source_url", "")
             status = _status(rec.get("target_url", ""), bool(rec.get("is_fallback")))
             rec_rows.append([
                 priority_icons.get(rec.get("priority", ""), ""),
-                rec.get("source_url", ""),
+                source,
                 rec.get("target_url", ""),
                 rec.get("suggested_anchor", ""),
                 status,
+                _section(source),
                 str(int(rec.get("relevance_score", 0))),
                 _tag(rec, status),
             ])
@@ -235,7 +244,30 @@ def generate_html_report(
             <span style="color:#F87171;font-weight:600;">{n_high} high</span>,
             <span style="color:#FBBF24;font-weight:600;">{n_med} medium</span>,
             <span style="color:#34D399;font-weight:600;">{n_low} low</span> priority.</p>
-        {_table_html(["", "Source URL", "Target URL", "Anchor", "Target", "Score", "Reason"], rec_rows, max_height="600px")}
+        {_table_html(["", "Source URL", "Target URL", "Anchor", "Target", "Section", "Score", "Reason"], rec_rows, max_height="600px")}
+        """
+
+    # --- C3 — Recurring-event redirect candidates ---
+    redirect_section = ""
+    if redirect_candidates:
+        redirect_rows = []
+        for cand in redirect_candidates:
+            redirect_rows.append([
+                cand.get("series", ""),
+                str(cand.get("past_year", "")),
+                cand.get("past_url", ""),
+                "→",
+                str(cand.get("current_year", "")),
+                cand.get("current_url", ""),
+            ])
+        redirect_section = f"""
+        <h2 style="margin-top:48px;">Past-edition redirect candidates</h2>
+        <p style="color:#94A3B8;font-size:14px;margin-bottom:16px;">
+            Found <strong style="color:#F0F4F8;">{len(redirect_candidates)}</strong>
+            past-edition page(s) of recurring series that should
+            <strong>301-redirect</strong> to the current edition. Implementing these
+            consolidates ranking signals onto the current page.</p>
+        {_table_html(["Series", "Past year", "Past URL", "", "Current year", "Current URL"], redirect_rows, max_height="500px")}
         """
 
     # --- Token usage ---
@@ -395,6 +427,9 @@ def generate_html_report(
 
         <!-- AI Recommendations -->
         {recs_section}
+
+        <!-- Past-edition redirect candidates (C3) -->
+        {redirect_section}
 
         <!-- Token Usage -->
         {token_section}

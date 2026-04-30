@@ -15,7 +15,9 @@ from google.genai import errors as genai_errors
 
 import src.config as _config
 from src.analysis.relevance_scorer import score_pair
-from src.analysis.event_detection import is_past_event
+from src.analysis.event_detection import is_past_event, find_recurring_event_redirects
+from src.analysis.market_detector import market_for_url
+from src.cleaning.language import extract_lang_segment
 
 
 # --------------------------------------------------------------------------- #
@@ -66,6 +68,25 @@ def get_client() -> genai.Client | None:
     if not _config.GEMINI_API_KEY:
         return None
     return genai.Client(api_key=_config.GEMINI_API_KEY)
+
+
+def _thinking_config_for_model(model: str) -> dict | None:
+    """Return a thinking-config override for the current model, or None to use defaults.
+
+    - Flash-Lite Preview (3.x): thinking_level="low" — purpose-built for high-volume
+      structured extraction; capping thinking saves cost without hurting quality.
+    - 2.5 Flash (legacy GA): thinking_budget=0 — kill thinking entirely on the
+      cheaper legacy model.
+    - Pro Preview / Flash Preview / unknown: None — let the SDK pick. Pro Preview
+      rejects budget=0 outright (Session 17/18 incident) and works fine with default
+      thinking; Flash Preview's defaults are already cost-reasonable.
+    """
+    name = (model or "").lower()
+    if "flash-lite" in name and "3" in name:
+        return {"thinking_level": "low"}
+    if "2.5-flash" in name or "2.5 flash" in name:
+        return {"thinking_budget": 0}
+    return None
 
 
 def check_api_health() -> dict:
@@ -132,16 +153,21 @@ def _call_gemini(client: genai.Client, prompt: str, max_tokens: int | None = Non
         max_tokens = _config.GEMINI_MAX_OUTPUT_TOKENS
     global _token_usage
 
+    cfg: dict = {
+        "max_output_tokens": max_tokens,
+        "temperature": 0.2,
+        "response_mime_type": "application/json",
+    }
+    thinking = _thinking_config_for_model(_config.GEMINI_MODEL)
+    if thinking is not None:
+        cfg["thinking_config"] = thinking
+
     for attempt in range(max_retries):
         try:
             response = client.models.generate_content(
                 model=_config.GEMINI_MODEL,
                 contents=prompt,
-                config={
-                    "max_output_tokens": max_tokens,
-                    "temperature": 0.2,
-                    "response_mime_type": "application/json",
-                },
+                config=cfg,
             )
 
             # Track token usage
@@ -285,6 +311,80 @@ def _batch_pages(contexts: list[dict], batch_size: int = _config.AI_BATCH_SIZE) 
     return [contexts[i:i + batch_size] for i in range(0, len(contexts), batch_size)]
 
 
+# B7 — Localized slug hints for cocoon detection. Slugs are heavily
+# translated on multilingual sites (e.g. /it/codici-bonus/, /es/calculadora/,
+# /de/wettrechner/) and the AI's English-trained pattern recognition needs
+# explicit cues. Keys are ISO 639-1 codes (the base part of locale variants).
+_LOCALIZED_SLUG_HINTS = {
+    "it": (
+        "codici / codice promozionale = code; bonus = bonus (same); "
+        "recensione = review; app = app (same); diretta = streaming/live; "
+        "pagamenti = payments; calcolatore di scommesse = bet calculator"
+    ),
+    "es": (
+        "codigo / codigo-promocional = code; bono / bonos = bonus; "
+        "reseña / opinion = review; app / aplicacion = app; "
+        "transmision-en-vivo = streaming; pagos = payments; "
+        "calculadora-de-apuestas = bet calculator"
+    ),
+    "pt": (
+        "codigo / codigo-promocional = code; bonus / bonus-de-boas-vindas = bonus; "
+        "avaliacao / analise = review; aplicativo / app = app; "
+        "transmissao-ao-vivo = streaming; pagamentos = payments; "
+        "calculadora = calculator"
+    ),
+    "fr": (
+        "code / code-promo / codes = code; bonus = bonus (same); "
+        "avis / examen = review; application / app = app; "
+        "streaming / direct = streaming; paiements = payments; "
+        "calculatrice-de-pari = bet calculator"
+    ),
+    "de": (
+        "aktionscode / promo-code / code = code; bonus = bonus (same); "
+        "test / bewertung / erfahrungen = review; app = app (same); "
+        "live-streaming = streaming; zahlungen = payments; "
+        "wettrechner = bet calculator"
+    ),
+    "pl": "kody-promocyjne / kod = code; bonus = bonus; recenzja = review",
+    "ro": "cod / cod-promotional = code; bonus = bonus; recenzie = review",
+    "cs": "kod / promo-kod = code; bonus = bonus; recenze = review",
+    "sv": "kod / kampanjkod = code; bonus = bonus; recension = review",
+    "da": "kode / kampagnekode = code; bonus = bonus; anmeldelse = review",
+    "no": "kode / kampanjekode = code; bonus = bonus; anmeldelse = review",
+    "fi": "koodi / kampanjakoodi = code; bonus = bonus; arvostelu = review",
+    "nl": "code / promocode = code; bonus = bonus; recensie = review",
+    "tr": "kod / promosyon-kodu = code; bonus = bonus; inceleme = review",
+    "ja": "コード / プロモコード = code; ボーナス = bonus; レビュー = review",
+    "bg": "код / промо-код = code; бонус = bonus; ревю = review",
+    "sr": "kod / promo-kod = code; bonus = bonus; recenzija = review",
+}
+
+
+def _localized_slug_hints(section_code: str | None) -> str:
+    """Build a prompt addendum with translated slug hints for the detected section.
+
+    Returns an empty string for None/English/unknown so the default English-only
+    prompt stays unchanged. The hint is inserted after the rules block, before
+    the URL list.
+    """
+    if not section_code:
+        return ""
+    code = section_code.lower()
+    if code == "en":
+        return ""
+    hints = _LOCALIZED_SLUG_HINTS.get(code)
+    if not hints:
+        return (
+            f"\n8. **Localization** — these URLs are under the /{code}/ section. "
+            f"Slugs are translated; interpret terms like 'review', 'bonus', 'code', "
+            f"'app', 'streaming' from the page paths regardless of language.\n"
+        )
+    return (
+        f"\n8. **Localization** — these URLs are under the /{code}/ section. "
+        f"Translated slug hints: {hints}.\n"
+    )
+
+
 def detect_cocoons(
     contexts: list[dict],
     client: genai.Client,
@@ -320,6 +420,21 @@ def detect_cocoons(
         if ctx.get("content_type"):
             entry += f"  [type: {ctx['content_type']}]"
         url_entries.append(entry)
+
+    # B7: Pre-detect the dominant URL section so the prompt can be localized
+    # with translated-slug hints. Cocoons are typically intra-section after
+    # Phase A's filter, so a single hint per run is accurate enough.
+    sample_urls = [c["url"] for c in ordered_contexts[:200]]
+    section_codes = [extract_lang_segment(u) for u in sample_urls]
+    code_counts: dict[str, int] = {}
+    for c in section_codes:
+        if c:
+            base = c.split("-")[0]
+            code_counts[base] = code_counts.get(base, 0) + 1
+    dominant_section = (
+        max(code_counts.items(), key=lambda kv: kv[1])[0] if code_counts else None
+    )
+    locale_hint = _localized_slug_hints(dominant_section)
 
     # Batch URLs to avoid overloading the prompt
     batch_size = _config.AI_COCOON_BATCH_SIZE
@@ -367,7 +482,7 @@ Rules:
    "comparator" is the page type for multi-operator comparison pages.
 
 7. IMPORTANT: Return the FULL URLs exactly as provided (starting with https://), not just paths.
-
+{locale_hint}
 Here are the URLs:
 
 {url_text}
@@ -725,6 +840,10 @@ Find as many relevant opportunities as you can (aim for 5-15 per batch). ORPHANS
                             page_type=page_type_lookup.get(tgt_valid),
                             target_keyword=(tgt_ctx.get("target_keyword") if tgt_ctx else None),
                         ),
+                        source_section=extract_lang_segment(src_valid),
+                        target_section=extract_lang_segment(tgt_valid),
+                        source_market=market_for_url(src_valid),
+                        target_market=market_for_url(tgt_valid),
                     )
                     if not scored["passed"]:
                         continue
@@ -879,9 +998,19 @@ def run_ai_analysis(
         details = "; ".join(all_batch_errors[:3])  # Show up to 3 errors
         error_msg = f"{len(all_batch_errors)} batch(es) failed after retry (partial results shown). Errors: {details}"
 
+    # C3 — recurring-event redirect candidates. Computed deterministically
+    # from the URL set (no AI call), so it always runs even if AI fails.
+    all_known_urls = (
+        set(cleaned_df["Source"].tolist())
+        | set(cleaned_df["Destination"].tolist())
+        | set(priority_df["URL"].tolist())
+    )
+    redirect_candidates = find_recurring_event_redirects(all_known_urls)
+
     return {
         "cocoons": cocoons,
         "recommendations": recommendations,
+        "redirect_candidates": redirect_candidates,
         "token_usage": get_token_usage(),
         "error": error_msg,
         "budget_stats": budget_stats,

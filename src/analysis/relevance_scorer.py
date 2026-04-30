@@ -118,11 +118,24 @@ def score_pair(
     target_inbound_anchors: list[str] | None,
     is_multi_operator_source: bool = False,
     target_is_past_event: bool = False,
+    source_section: str | None = None,
+    target_section: str | None = None,
+    source_market: str | None = None,
+    target_market: str | None = None,
 ) -> dict:
     """Score a candidate (source, target) pair.
 
     Returns a dict {"score": int, "passed": bool, "reason": str}.
     Hard filters discard the pair entirely (passed=False, score=0).
+
+    `source_section` / `target_section`: ISO 639-1 or 3166-1 code for the
+    URL section (e.g. "it", "mx"). When both are set and differ, the pair
+    is blocked (B6 — defense-in-depth alongside the Phase A cleaning filter).
+
+    `source_market` / `target_market`: market code from
+    `market_detector.market_for_url`. When both are set and differ, blocked
+    (Phase 10 backlog — per-link market filtering, complements the start-of-run
+    market gate).
     """
     # ----- Hard filters -----
     if source_url == target_url:
@@ -130,6 +143,25 @@ def score_pair(
 
     if (source_url, target_url) in existing_links:
         return {"score": 0, "passed": False, "reason": "link already exists"}
+
+    # B6: cross-section (language / country) link blocked. Only enforced when
+    # BOTH sides have a recognized section code — None means root / no prefix,
+    # which is fine to link from/to a specific section in some BC layouts.
+    if source_section and target_section and source_section != target_section:
+        return {
+            "score": 0,
+            "passed": False,
+            "reason": f"cross-section link blocked (/{source_section}/ → /{target_section}/)",
+        }
+
+    # Phase 10 backlog: cross-market link blocked. Same rule shape as B6 but
+    # uses the market_detector signals (TLD, geo subdomain, market subfolder).
+    if source_market and target_market and source_market != target_market:
+        return {
+            "score": 0,
+            "passed": False,
+            "reason": f"cross-market link blocked ({source_market} → {target_market})",
+        }
 
     # Cross-cocoon: only allowed if source is a multi-operator page
     if source_cocoons and target_cocoons:

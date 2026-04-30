@@ -2080,11 +2080,16 @@ def render_results():
         if st.session_state.priority_data is not None
         else set()
     )
+    redirect_candidates = (
+        st.session_state.ai_results.get("redirect_candidates", [])
+        if st.session_state.ai_results else []
+    )
     csv_content = generate_linking_plan_csv(
         cleaned_df=cleaned,
         recommendations=recommendations,
         orphan_urls=csv_orphans,
         priority_urls=csv_priorities,
+        redirect_candidates=redirect_candidates,
     )
 
     # Side-by-side downloads: CSV + HTML report
@@ -2109,6 +2114,7 @@ def render_results():
         cocoon_health_df=st.session_state.get("cocoon_health_data"),
         recommendations=recommendations,
         token_usage=st.session_state.get("token_usage"),
+        redirect_candidates=redirect_candidates,
     )
 
     with st._bottom:
