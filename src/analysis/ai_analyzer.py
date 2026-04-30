@@ -144,28 +144,58 @@ def _url_slug(url: str) -> str:
         return url
 
 
-def _call_gemini(client: genai.Client, prompt: str, max_tokens: int | None = None, max_retries: int = 3) -> str:
+_FLASH_LITE_MODEL = "gemini-3.1-flash-lite-preview"
+
+
+def _cocoon_model() -> str:
+    """C1 — model routing: cocoon classification uses Flash-Lite when the
+    user has picked a more expensive model for recommendations.
+
+    Cocoon detection is a structured extraction task ("group these URLs by
+    operator + classify page type"). Flash-Lite is purpose-built for this
+    and ~6-7x cheaper than Pro Preview. When the user keeps Flash-Lite as
+    their main model, cocoon stays on Flash-Lite (no routing needed).
+    """
+    main = (_config.GEMINI_MODEL or "").lower()
+    if "flash-lite" in main:
+        return _config.GEMINI_MODEL  # already on the cheap tier
+    if "2.5-flash" in main:
+        return _config.GEMINI_MODEL  # legacy GA — keep aligned, both cheap
+    return _FLASH_LITE_MODEL
+
+
+def _call_gemini(
+    client: genai.Client,
+    prompt: str,
+    max_tokens: int | None = None,
+    max_retries: int = 3,
+    model: str | None = None,
+) -> str:
     """Call Gemini and return the text response. Tracks token usage.
 
-    Handles rate limits (429) with exponential backoff.
+    Handles rate limits (429) with exponential backoff. `model` defaults to
+    `_config.GEMINI_MODEL` — pass a different value (e.g. via `_cocoon_model()`)
+    to route a specific call to a different tier (C1).
     """
     if max_tokens is None:
         max_tokens = _config.GEMINI_MAX_OUTPUT_TOKENS
     global _token_usage
+
+    chosen_model = model or _config.GEMINI_MODEL
 
     cfg: dict = {
         "max_output_tokens": max_tokens,
         "temperature": 0.2,
         "response_mime_type": "application/json",
     }
-    thinking = _thinking_config_for_model(_config.GEMINI_MODEL)
+    thinking = _thinking_config_for_model(chosen_model)
     if thinking is not None:
         cfg["thinking_config"] = thinking
 
     for attempt in range(max_retries):
         try:
             response = client.models.generate_content(
-                model=_config.GEMINI_MODEL,
+                model=chosen_model,
                 contents=prompt,
                 config=cfg,
             )
@@ -503,7 +533,9 @@ Respond with a JSON object with this exact structure:
 
         for attempt in range(2):  # 1 retry on failure
             try:
-                text = _call_gemini(client, prompt)
+                # C1 — route cocoon classification to Flash-Lite when user picked
+                # a more expensive model for recommendations.
+                text = _call_gemini(client, prompt, model=_cocoon_model())
                 result = json.loads(text)
                 batch_cocoons = result.get("cocoons", [])
                 all_cocoons.extend(batch_cocoons)

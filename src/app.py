@@ -45,7 +45,10 @@ from src.cleaning.language import (
 )
 from src.analysis.cost_estimator import estimate_cost, format_cost
 from src.analysis.link_audit import compute_link_audit, get_priority_urls_health
-from src.analysis.pagerank import compute_pagerank, get_top_pages, get_pagerank_distribution
+from src.analysis.pagerank import (
+    compute_pagerank, compute_weighted_pagerank, compute_pagerank_comparison,
+    get_top_pages, get_pagerank_distribution,
+)
 from src.analysis.ai_analyzer import run_ai_analysis, get_token_usage, check_api_health
 from src.analysis.cocoon_health import analyze_cocoon_health
 from src.export.csv_export import generate_linking_plan_csv
@@ -91,6 +94,8 @@ if "audit_results" not in st.session_state:
     st.session_state.audit_results = None
 if "pagerank_scores" not in st.session_state:
     st.session_state.pagerank_scores = None
+if "weighted_pagerank_scores" not in st.session_state:
+    st.session_state.weighted_pagerank_scores = None
 if "ai_results" not in st.session_state:
     st.session_state.ai_results = None
 if "cocoon_health_data" not in st.session_state:
@@ -627,6 +632,14 @@ def _render_cost_estimate(remaining_url_count: int):
     if est["total_cost"] >= 5:
         color = "#F87171"  # red when ≥$5
 
+    routing_line = ""
+    if est.get("routed"):
+        routing_line = (
+            f"<div style='font-size:11px;color:#64748B;margin-top:2px;'>"
+            f"Cocoon routed to <code>{est['cocoon_model']}</code> (cheaper, "
+            f"same accuracy on structured extraction).</div>"
+        )
+
     st.markdown(
         f"<div style='border:1px solid rgba(148,163,184,0.2);border-radius:10px;"
         f"padding:14px 18px;margin:18px 0 6px;background:rgba(15,23,42,0.4);'>"
@@ -637,6 +650,7 @@ def _render_cost_estimate(remaining_url_count: int):
         f"<div style='font-size:11px;color:#64748B;margin-top:2px;'>"
         f"{est['capped_pages']:,} pages · {est['total_calls']} API calls · "
         f"<code>{model}</code></div>"
+        f"{routing_line}"
         f"</div>"
         f"<div style='font-size:28px;font-weight:600;color:{color};font-family:JetBrains Mono,monospace;'>"
         f"~{cost_str}</div>"
@@ -1436,6 +1450,10 @@ def render_analyzing():
         try:
             scores = compute_pagerank(cleaned)
             st.session_state.pagerank_scores = scores
+            # PageRank v2 — weighted by Link Position. Falls back to basic
+            # internally if Link Position is missing (so this is always safe).
+            weighted_scores = compute_weighted_pagerank(cleaned)
+            st.session_state.weighted_pagerank_scores = weighted_scores
             _update_time()
             step2_ph.markdown(
                 _step("done", "PageRank", f"\u2014 {len(scores):,} pages"),
@@ -1757,21 +1775,74 @@ def render_results():
         unsafe_allow_html=True,
     )
 
-    top_pages = get_top_pages(scores, n=30)
-    # Format PageRank as a more readable number
-    top_pages["PageRank"] = top_pages["PageRank"].apply(lambda x: f"{x:.6f}")
+    weighted_scores = st.session_state.get("weighted_pagerank_scores")
+    pr_tabs = st.tabs(["Basic", "Weighted by Link Position", "Movers (Basic vs Weighted)"]) if weighted_scores else None
 
-    st.dataframe(
-        top_pages,
-        use_container_width=True,
-        hide_index=True,
-        height=400,
-        column_config={
-            "Rank": st.column_config.NumberColumn("Rank", width="small"),
-            "URL": st.column_config.TextColumn("URL", width="large"),
-            "PageRank": st.column_config.TextColumn("PageRank Score", width="medium"),
-        },
-    )
+    if pr_tabs is None:
+        top_pages = get_top_pages(scores, n=30)
+        top_pages["PageRank"] = top_pages["PageRank"].apply(lambda x: f"{x:.6f}")
+        st.dataframe(
+            top_pages,
+            use_container_width=True, hide_index=True, height=400,
+            column_config={
+                "Rank": st.column_config.NumberColumn("Rank", width="small"),
+                "URL": st.column_config.TextColumn("URL", width="large"),
+                "PageRank": st.column_config.TextColumn("PageRank Score", width="medium"),
+            },
+        )
+    else:
+        with pr_tabs[0]:
+            top_pages = get_top_pages(scores, n=30)
+            top_pages["PageRank"] = top_pages["PageRank"].apply(lambda x: f"{x:.6f}")
+            st.dataframe(
+                top_pages, use_container_width=True, hide_index=True, height=400,
+                column_config={
+                    "Rank": st.column_config.NumberColumn("Rank", width="small"),
+                    "URL": st.column_config.TextColumn("URL", width="large"),
+                    "PageRank": st.column_config.TextColumn("PageRank Score", width="medium"),
+                },
+            )
+        with pr_tabs[1]:
+            st.markdown(
+                "<p style='color:#94A3B8;font-size:13px;margin-bottom:8px;'>"
+                "Weighted PageRank counts content links 1.0, sidebar 0.3, navigation/header 0.2, footer 0.1. "
+                "Pages with strong content backlinks rise; pages relying on nav/footer drop. "
+                "Closer to the equity model Google uses.</p>",
+                unsafe_allow_html=True,
+            )
+            top_w = get_top_pages(weighted_scores, n=30)
+            top_w["PageRank"] = top_w["PageRank"].apply(lambda x: f"{x:.6f}")
+            st.dataframe(
+                top_w, use_container_width=True, hide_index=True, height=400,
+                column_config={
+                    "Rank": st.column_config.NumberColumn("Rank", width="small"),
+                    "URL": st.column_config.TextColumn("URL", width="large"),
+                    "PageRank": st.column_config.TextColumn("Weighted PR Score", width="medium"),
+                },
+            )
+        with pr_tabs[2]:
+            st.markdown(
+                "<p style='color:#94A3B8;font-size:13px;margin-bottom:8px;'>"
+                "Biggest rank movers between basic and weighted PageRank. "
+                "<strong style='color:#34D399;'>Negative Δ</strong> = page jumped UP under weighted (its inbound links are mostly content). "
+                "<strong style='color:#F87171;'>Positive Δ</strong> = page dropped (its inbound links are mostly nav/footer/sidebar — low real authority).</p>",
+                unsafe_allow_html=True,
+            )
+            cmp_df = compute_pagerank_comparison(scores, weighted_scores).head(50).copy()
+            cmp_df["Basic PR"] = cmp_df["Basic PR"].apply(lambda x: f"{x:.6f}")
+            cmp_df["Weighted PR"] = cmp_df["Weighted PR"].apply(lambda x: f"{x:.6f}")
+            st.dataframe(
+                cmp_df,
+                use_container_width=True, hide_index=True, height=500,
+                column_config={
+                    "URL": st.column_config.TextColumn("URL", width="large"),
+                    "Basic PR": st.column_config.TextColumn("Basic PR", width="small"),
+                    "Weighted PR": st.column_config.TextColumn("Weighted PR", width="small"),
+                    "Basic Rank": st.column_config.NumberColumn("Basic Rank", width="small"),
+                    "Weighted Rank": st.column_config.NumberColumn("Weighted Rank", width="small"),
+                    "Δ Rank": st.column_config.NumberColumn("Δ Rank", width="small", help="Negative = improved under weighted PR"),
+                },
+            )
 
     # ---- Priority URLs Health ----
     st.markdown("<br>", unsafe_allow_html=True)

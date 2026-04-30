@@ -48,35 +48,62 @@ def _resolve_per_page(model: str) -> tuple[float, bool]:
 def estimate_cost(
     page_count: int,
     model: str | None = None,
+    cocoon_model: str | None = None,
 ) -> dict:
     """Estimate the USD cost of running the AI pipeline.
 
-    page_count is the number of unique pages remaining after Step 2 exclusions
-    (we do NOT pre-apply the page cap here — the function reports both the raw
-    page count and the capped count so the UI can explain the cap).
+    `model` is the recommendation-call model (the user's pick).
+    `cocoon_model` (C1 routing) is the cocoon-classification model — defaults
+    to Flash-Lite when the recommendation model is more expensive, matching
+    the runtime behavior of `ai_analyzer._cocoon_model()`.
+
+    Cost is split between cocoon and recommendation batches by call share,
+    so picking Pro for recommendations no longer pays the Pro premium on
+    the cocoon-classification work.
 
     Returns dict with:
-        page_count, capped_pages, model, cost_per_page, total_cost,
-        cocoon_batches, recommendation_batches, total_calls, is_known_model
+        page_count, capped_pages, model, cocoon_model, cost_per_page,
+        total_cost, cocoon_batches, recommendation_batches, total_calls,
+        is_known_model, routed (bool — true when cocoon != rec model)
     """
     model = model or _config.GEMINI_MODEL
+    if cocoon_model is None:
+        # Default routing matches ai_analyzer._cocoon_model() exactly.
+        name = (model or "").lower()
+        if "flash-lite" in name or "2.5-flash" in name:
+            cocoon_model = model
+        else:
+            cocoon_model = "gemini-3.1-flash-lite-preview"
+
     capped = min(page_count, PAGE_CAP)
-    per_page, is_known = _resolve_per_page(model)
+    per_page_rec, is_known_rec = _resolve_per_page(model)
+    per_page_cocoon, is_known_cocoon = _resolve_per_page(cocoon_model)
 
     cocoon_batches = max(1, math.ceil(capped / _config.AI_COCOON_BATCH_SIZE)) if capped else 0
     rec_batches = max(1, math.ceil(capped / _config.AI_BATCH_SIZE)) if capped else 0
+    total_calls = cocoon_batches + rec_batches
 
-    total_cost = capped * per_page
+    if total_calls > 0 and capped > 0:
+        cocoon_share = cocoon_batches / total_calls
+        rec_share = rec_batches / total_calls
+        # Blended per-page cost across the two tiers.
+        blended_per_page = (cocoon_share * per_page_cocoon) + (rec_share * per_page_rec)
+    else:
+        blended_per_page = per_page_rec
+
+    total_cost = capped * blended_per_page
     return {
         "page_count": page_count,
         "capped_pages": capped,
         "model": model,
-        "cost_per_page": per_page,
+        "cocoon_model": cocoon_model,
+        "cost_per_page": blended_per_page,
         "total_cost": total_cost,
         "cocoon_batches": cocoon_batches,
         "recommendation_batches": rec_batches,
-        "total_calls": cocoon_batches + rec_batches,
-        "is_known_model": is_known,
+        "total_calls": total_calls,
+        "is_known_model": is_known_rec and is_known_cocoon,
+        "routed": cocoon_model != model,
         "page_cap_applied": page_count > PAGE_CAP,
     }
 
