@@ -193,8 +193,10 @@ def generate_html_report(
         orphan_set = {r["url"] for r in all_orphan_pages}
         priority_set = set(priority_health_df["URL"].tolist()) if priority_health_df is not None else set()
 
-        def _status(u, is_fb):
-            if is_fb:
+        def _status(u, rec):
+            if rec and rec.get("is_coverage_fallback"):
+                return "Coverage"
+            if rec and rec.get("is_fallback"):
                 return "Fallback"
             if u in orphan_set:
                 return "Orphan"
@@ -204,7 +206,8 @@ def generate_html_report(
 
         def _tag(r, s):
             base = r.get("reason", "")
-            if base.startswith("[Orphan target]") or base.startswith("[Priority target]") or base.startswith("[Fallback link]"):
+            if (base.startswith("[Orphan target]") or base.startswith("[Priority target]")
+                    or base.startswith("[Fallback link]") or base.startswith("[Coverage fallback]")):
                 return base
             if s == "Orphan":
                 return f"[Orphan target] {base}".strip()
@@ -212,6 +215,8 @@ def generate_html_report(
                 return f"[Priority target] {base}".strip()
             if s == "Fallback":
                 return f"[Fallback link] {base}".strip()
+            if s == "Coverage":
+                return f"[Coverage fallback] {base}".strip()
             return base
 
         priority_icons = {"high": "🔴", "medium": "🟡", "low": "🟢"}
@@ -224,7 +229,7 @@ def generate_html_report(
         rec_rows = []
         for rec in recommendations:
             source = rec.get("source_url", "")
-            status = _status(rec.get("target_url", ""), bool(rec.get("is_fallback")))
+            status = _status(rec.get("target_url", ""), rec)
             rec_rows.append([
                 priority_icons.get(rec.get("priority", ""), ""),
                 source,

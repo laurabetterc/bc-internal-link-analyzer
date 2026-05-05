@@ -21,6 +21,13 @@ ILA_DEV_MODE = os.environ.get("ILA_DEV_MODE", "").lower() in ("1", "true", "yes"
 AI_BATCH_SIZE = 20
 AI_COCOON_BATCH_SIZE = 40
 
+# Phase 11 / B1 — embeddings-based candidate generation. When enabled, the
+# pipeline runs Gemini text embeddings + cosine similarity + hard-filter
+# pre-filtering BEFORE the recommendation AI calls, then passes the shortlist
+# as hints in the prompt. Falls back to the legacy open-ended path if
+# embedding generation fails. Default ON; set ILA_USE_EMBEDDINGS=0 to disable.
+ILA_USE_EMBEDDINGS = os.environ.get("ILA_USE_EMBEDDINGS", "1").lower() not in ("0", "false", "no", "off")
+
 # Health thresholds for priority URLs
 HEALTH_CRITICAL_MAX = 2  # 0-2 links = critical
 HEALTH_WARNING_MAX = 7   # 3-7 links = warning

@@ -92,13 +92,25 @@ def estimate_cost(
         blended_per_page = per_page_rec
 
     total_cost = capped * blended_per_page
+
+    # B1 — embedding shortlist cost. gemini-embedding-001 prices at ~$0.000025
+    # per 1K input tokens. ~30 tokens per page text -> ~$0.00075 per 1K pages.
+    # Negligible vs recommendation cost; surfaced separately so the user can
+    # see the full pipeline cost when the feature is on.
+    embedding_cost = 0.0
+    if _config.ILA_USE_EMBEDDINGS and capped > 0:
+        embedding_cost = capped * 0.00000075  # ~$0.00075 per 1000 pages
+
     return {
         "page_count": page_count,
         "capped_pages": capped,
         "model": model,
         "cocoon_model": cocoon_model,
         "cost_per_page": blended_per_page,
-        "total_cost": total_cost,
+        "total_cost": total_cost + embedding_cost,
+        "recommendation_cost": total_cost,
+        "embedding_cost": embedding_cost,
+        "embeddings_enabled": _config.ILA_USE_EMBEDDINGS,
         "cocoon_batches": cocoon_batches,
         "recommendation_batches": rec_batches,
         "total_calls": total_calls,

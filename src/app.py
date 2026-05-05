@@ -640,6 +640,15 @@ def _render_cost_estimate(remaining_url_count: int):
             f"same accuracy on structured extraction).</div>"
         )
 
+    embedding_line = ""
+    if est.get("embeddings_enabled"):
+        embedding_line = (
+            f"<div style='font-size:11px;color:#64748B;margin-top:2px;'>"
+            f"+ embeddings shortlist (negligible — ~"
+            f"{format_cost(est['embedding_cost']) if est['embedding_cost'] >= 0.01 else '<$0.01'}"
+            f"): pre-filtered candidate pairs reduce the AI's working set.</div>"
+        )
+
     st.markdown(
         f"<div style='border:1px solid rgba(148,163,184,0.2);border-radius:10px;"
         f"padding:14px 18px;margin:18px 0 6px;background:rgba(15,23,42,0.4);'>"
@@ -651,6 +660,7 @@ def _render_cost_estimate(remaining_url_count: int):
         f"{est['capped_pages']:,} pages · {est['total_calls']} API calls · "
         f"<code>{model}</code></div>"
         f"{routing_line}"
+        f"{embedding_line}"
         f"</div>"
         f"<div style='font-size:28px;font-weight:600;color:{color};font-family:JetBrains Mono,monospace;'>"
         f"~{cost_str}</div>"
@@ -1521,6 +1531,11 @@ def render_analyzing():
                         _step("run", f"AI analysis \u2014 detecting cocoons (batch {batch}/{total_batches})"),
                         unsafe_allow_html=True,
                     )
+                elif phase == "embeddings":
+                    step3_phase_ph.markdown(
+                        _step("run", "AI analysis \u2014 generating candidate shortlist (embeddings)..."),
+                        unsafe_allow_html=True,
+                    )
                 elif phase == "recommendations":
                     step3_phase_ph.markdown(
                         _step("run", f"AI analysis \u2014 finding links (batch {batch}/{total_batches})"),
@@ -2118,6 +2133,57 @@ def render_results():
                 "Check the token usage below — if API calls were made, the responses may have been invalid."
             )
 
+    # ---- Coverage Guarantee (every page receives + sends links) ----
+    coverage_stats = ai_results.get("coverage_stats") if ai_results else None
+    if coverage_stats and coverage_stats.get("total_urls", 0) > 0:
+        total = coverage_stats["total_urls"]
+        in_gaps = coverage_stats["inbound_gaps_before"]
+        out_gaps = coverage_stats["outbound_gaps_before"]
+        in_filled = coverage_stats["inbound_fallbacks_added"]
+        out_filled = coverage_stats["outbound_fallbacks_added"]
+        in_unfillable = coverage_stats.get("inbound_unfillable", 0)
+        out_unfillable = coverage_stats.get("outbound_unfillable", 0)
+
+        in_covered = total - max(0, in_gaps - in_filled)
+        out_covered = total - max(0, out_gaps - out_filled)
+        in_pct = (in_covered / total * 100) if total else 100.0
+        out_pct = (out_covered / total * 100) if total else 100.0
+
+        all_covered = (in_unfillable + out_unfillable) == 0
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown(f"### Coverage Guarantee {render_badge('SAFETY')}", unsafe_allow_html=True)
+        st.markdown(
+            "<p style='color:#94A3B8;font-size:13px;margin:0 0 12px 0;'>"
+            "Every page in the cleaned crawl should receive AND send at least one link in the final state "
+            "(existing crawl links + recommendations combined). Pages with gaps get "
+            "<code>[Coverage fallback]</code> tagged in the Reason column of the CSV.</p>",
+            unsafe_allow_html=True,
+        )
+        cc1, cc2, cc3, cc4 = st.columns(4)
+        with cc1:
+            st.metric("Total pages", f"{total:,}")
+        with cc2:
+            st.metric("Inbound covered", f"{in_pct:.1f}%", delta=f"{in_filled} filled" if in_filled else None)
+        with cc3:
+            st.metric("Outbound covered", f"{out_pct:.1f}%", delta=f"{out_filled} filled" if out_filled else None)
+        with cc4:
+            color = "#34D399" if all_covered else "#FBBF24"
+            label = "All covered" if all_covered else f"{in_unfillable + out_unfillable} unfillable"
+            st.markdown(
+                f"<div style='padding:8px 0;'>"
+                f"<div style='font-size:14px;color:#94A3B8;'>Status</div>"
+                f"<div style='font-size:24px;font-weight:600;color:{color};font-family:JetBrains Mono,monospace;'>{label}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        if in_gaps == 0 and out_gaps == 0:
+            st.markdown(
+                "<p style='color:#34D399;font-size:12px;margin-top:6px;'>"
+                "No gaps — every page already had inbound + outbound coverage from AI recs / existing crawl links.</p>",
+                unsafe_allow_html=True,
+            )
+
     # ---- Token Usage (inline) ----
     token_usage = st.session_state.token_usage
     if token_usage and token_usage.get("api_calls", 0) > 0:
@@ -2141,6 +2207,35 @@ def render_results():
             f"(free tier: 20 req/day, 1M tokens/day)</p>",
             unsafe_allow_html=True,
         )
+
+        # Embedding shortlist stats (B1) — surface alongside token usage so the
+        # user can see how aggressively the candidate filter trimmed the AI's
+        # working set.
+        emb_stats = ai_results.get("embedding_stats") if ai_results else None
+        if emb_stats and not emb_stats.get("error"):
+            cache_label = "cache hit" if emb_stats.get("cache_hit") else f"{emb_stats.get('batches_called', 0)} embedding batch(es)"
+            raw = emb_stats.get("raw_candidates")
+            filt = emb_stats.get("filtered_candidates")
+            sources = emb_stats.get("sources_with_hints")
+            line = f"Embeddings shortlist: {emb_stats.get('pages', 0):,} pages embedded ({cache_label})"
+            if raw is not None and filt is not None:
+                if raw > 0:
+                    pct = (1 - filt / raw) * 100
+                    line += f" · {raw:,} raw → {filt:,} after hard filters ({pct:.0f}% trimmed)"
+                else:
+                    line += f" · {filt:,} candidate pairs"
+            if sources is not None:
+                line += f" · {sources:,} source pages with AI hints"
+            st.markdown(
+                f"<p style='color:#64748B;font-size:12px;margin-top:4px;'>{line}</p>",
+                unsafe_allow_html=True,
+            )
+        elif emb_stats and emb_stats.get("error"):
+            st.markdown(
+                f"<p style='color:#FBBF24;font-size:12px;margin-top:4px;'>"
+                f"Embeddings unavailable ({emb_stats['error'][:120]}) — using legacy open-ended path.</p>",
+                unsafe_allow_html=True,
+            )
 
     # ---- Downloads (rendered in sticky st._bottom below) ----
     recommendations = ai_results.get("recommendations", []) if ai_results else []

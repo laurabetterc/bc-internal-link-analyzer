@@ -35,8 +35,10 @@ def generate_linking_plan_csv(
     orphans = orphan_urls or set()
     priorities = priority_urls or set()
 
-    def _target_status(target_url: str, is_fallback: bool) -> str:
-        if is_fallback:
+    def _target_status(target_url: str, rec: dict | None = None) -> str:
+        if rec and rec.get("is_coverage_fallback"):
+            return "Coverage"
+        if rec and rec.get("is_fallback"):
             return "Fallback"
         if target_url in orphans:
             return "Orphan"
@@ -46,7 +48,9 @@ def generate_linking_plan_csv(
 
     def _tagged_reason(rec: dict, status: str) -> str:
         base = rec.get("reason", "")
-        if base.startswith("[Orphan target]") or base.startswith("[Priority target]") or base.startswith("[Fallback link]"):
+        # Preserve any pre-existing tag (orphan_guarantee, coverage_guarantee, etc.)
+        if (base.startswith("[Orphan target]") or base.startswith("[Priority target]")
+                or base.startswith("[Fallback link]") or base.startswith("[Coverage fallback]")):
             return base
         if status == "Orphan":
             return f"[Orphan target] {base}".strip()
@@ -54,6 +58,8 @@ def generate_linking_plan_csv(
             return f"[Priority target] {base}".strip()
         if status == "Fallback":
             return f"[Fallback link] {base}".strip()
+        if status == "Coverage":
+            return f"[Coverage fallback] {base}".strip()
         return base
 
     rows = []
@@ -67,18 +73,20 @@ def generate_linking_plan_csv(
             "Target URL": target,
             "Anchor": link_row.get("Anchor", ""),
             "Status": "live",
-            "Target Status": _target_status(target, False),
+            "Target Status": _target_status(target, None),
             "Section": _section_label(source),
             "Score": "",
             "Priority": "",
             "Reason": "",
         })
 
-    # AI recommendations (status: "to add")
+    # AI recommendations (status: "to add"). Coverage fallbacks share the
+    # same Status value — the [Coverage fallback] tag in the Reason column
+    # is the filter signal, the Status column stays simple for the team.
     for rec in recommendations:
         target = rec.get("target_url", "")
         source = rec.get("source_url", "")
-        target_status_val = _target_status(target, bool(rec.get("is_fallback")))
+        target_status_val = _target_status(target, rec)
         rows.append({
             "Source URL": source,
             "Target URL": target,
@@ -116,9 +124,9 @@ def generate_linking_plan_csv(
         columns=["Source URL", "Target URL", "Anchor", "Status", "Target Status", "Section", "Score", "Priority", "Reason"],
     )
 
-    # Sort: 301 candidates first (highest urgency), then "to add", then "live"
+    # Sort: 301 candidates first (highest urgency), then "to add", then "live".
     status_order = {"301 candidate": 0, "to add": 1, "live": 2}
-    df["_sort"] = df["Status"].map(status_order)
+    df["_sort"] = df["Status"].map(status_order).fillna(99)
     df = df.sort_values(["_sort", "Target URL", "Source URL"]).drop(columns=["_sort"])
 
     buffer = StringIO()

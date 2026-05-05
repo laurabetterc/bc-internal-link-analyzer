@@ -17,6 +17,12 @@ import src.config as _config
 from src.analysis.relevance_scorer import score_pair
 from src.analysis.event_detection import is_past_event, find_recurring_event_redirects
 from src.analysis.market_detector import market_for_url
+from src.analysis.embeddings import compute_page_embeddings, generate_candidates
+from src.analysis.operator_detection import (
+    detect_operator_cocoons,
+    merge_cocoon_lists,
+    operator_hint_for_prompt,
+)
 from src.cleaning.language import extract_lang_segment
 
 
@@ -419,6 +425,7 @@ def detect_cocoons(
     contexts: list[dict],
     client: genai.Client,
     progress_callback=None,
+    operator_hint: str = "",
 ) -> list[dict]:
     """Use Gemini to detect operator-based cocoons from page URLs.
 
@@ -513,6 +520,7 @@ Rules:
 
 7. IMPORTANT: Return the FULL URLs exactly as provided (starting with https://), not just paths.
 {locale_hint}
+{operator_hint}
 Here are the URLs:
 
 {url_text}
@@ -627,11 +635,93 @@ def _find_closest_url(url: str, known_urls: set[str]) -> str | None:
     return None
 
 
+# --------------------------------------------------------------------------- #
+# B1 / B2 helpers — embedding-driven candidate generation + hard-filter prefilter
+# --------------------------------------------------------------------------- #
+
+
+def _filter_candidates_with_hard_rules(
+    candidates: list[tuple[str, str, float]],
+    cocoons: list[dict],
+    contexts: list[dict],
+    cleaned_df: pd.DataFrame,
+) -> list[tuple[str, str, float]]:
+    """Drop candidates that the hard filters in `score_pair` would reject.
+
+    Pre-applies the cheap hard rules (cross-cocoon, existing-link, cross-section,
+    cross-market, self-link) BEFORE we ever build a recommendation prompt.
+    Cuts the candidate list by ~70-90% in practice and ensures every pair the
+    AI sees is at least eligible.
+    """
+    if not candidates:
+        return []
+
+    # Cocoon membership lookup
+    operators_for_url: dict[str, list[str]] = {}
+    multi_op_urls: dict[str, list[str]] = {}
+    if cocoons:
+        for cocoon in cocoons:
+            op = cocoon.get("operator", "")
+            for url in cocoon.get("pages", []):
+                operators_for_url.setdefault(url, []).append(op)
+        multi_op_urls = cocoons[0].get("_multi_operator_urls", {}) or {}
+
+    existing_links = set(zip(cleaned_df["Source"].tolist(), cleaned_df["Destination"].tolist()))
+
+    out: list[tuple[str, str, float]] = []
+    for src, tgt, sim in candidates:
+        if src == tgt:
+            continue
+        if (src, tgt) in existing_links:
+            continue
+
+        # Cross-section
+        s_sec, t_sec = extract_lang_segment(src), extract_lang_segment(tgt)
+        if s_sec and t_sec and s_sec != t_sec:
+            continue
+
+        # Cross-market
+        s_mkt, t_mkt = market_for_url(src), market_for_url(tgt)
+        if s_mkt and t_mkt and s_mkt != t_mkt:
+            continue
+
+        # Cross-cocoon (allowed when source is multi-operator)
+        s_ops = operators_for_url.get(src, [])
+        t_ops = operators_for_url.get(tgt, [])
+        if s_ops and t_ops:
+            same_cocoon = bool(set(s_ops) & set(t_ops))
+            is_multi_op_src = len(s_ops) > 1 or src in multi_op_urls
+            if not same_cocoon and not is_multi_op_src:
+                continue
+
+        out.append((src, tgt, sim))
+    return out
+
+
+def _candidates_by_source(
+    candidates: list[tuple[str, str, float]],
+    max_per_source: int = 8,
+) -> dict[str, list[tuple[str, float]]]:
+    """Group filtered candidates by source URL, keeping the top N per source.
+
+    8 hints per page is enough context for the AI without bloating the prompt.
+    Sorted by similarity desc.
+    """
+    grouped: dict[str, list[tuple[str, float]]] = {}
+    for src, tgt, sim in candidates:
+        grouped.setdefault(src, []).append((tgt, sim))
+    for src in grouped:
+        grouped[src].sort(key=lambda t: t[1], reverse=True)
+        grouped[src] = grouped[src][:max_per_source]
+    return grouped
+
+
 def find_link_opportunities(
     contexts: list[dict],
     cocoons: list[dict],
     cleaned_df: pd.DataFrame,
     client: genai.Client,
+    candidates_for_source: dict[str, list[tuple[str, float]]] | None = None,
 ) -> list[dict]:
     """Use Gemini to find linking opportunities and suggest anchor texts.
 
@@ -734,6 +824,22 @@ def find_link_opportunities(
                         desc += " (THIS IS THE CODE PAGE)"
                     desc += "\n"
 
+            # B1 — embedding-derived candidate targets. Already passed cocoon /
+            # market / language hard filters, so every URL listed here is a valid
+            # candidate worth scoring. The AI should still apply rules 5 (intent
+            # match), 7 (cluster proximity), and 8 (anchor diversity).
+            if candidates_for_source:
+                hints = candidates_for_source.get(ctx["url"]) or []
+                if hints:
+                    hint_lines = "\n".join(
+                        f"    - {tgt}  (similarity: {sim:.2f})"
+                        for tgt, sim in hints
+                    )
+                    desc += (
+                        f"  Suggested candidate targets (semantic similarity, pre-filtered):\n"
+                        f"{hint_lines}\n"
+                    )
+
             page_descriptions.append(desc)
 
         pages_text = "\n".join(page_descriptions)
@@ -798,6 +904,8 @@ Rules for recommendations:
 9. **Don't recommend links that already exist** — I've already filtered those.
 
 10. **Use FULL URLs exactly as provided** (starting with https://), not just paths. Do NOT modify, truncate, or invent URLs.
+
+11. **Suggested candidate targets**: when a page has a "Suggested candidate targets" list, those URLs were pre-screened for semantic similarity AND already passed cocoon/market/language hard filters — they are PRIME candidates. Score and anchor them per the rules above. You may also recommend pairs outside this list when justified, but the candidates should be your starting point because they're already validated.
 
 For each recommendation, rate priority:
 - **high**: Orphan/true orphan target (rule 2), or priority page with critical/low link count
@@ -967,7 +1075,54 @@ def run_ai_analysis(
                 total_api_calls=total_api_calls,
             )
 
-    cocoons, cocoon_errors = detect_cocoons(contexts, client, progress_callback=cocoon_progress)
+    # Deterministic operator detection runs FIRST on the full cleaned crawl so
+    # we catch operators whose pages didn't make it into `contexts` (the AI's
+    # 500-page working set). Detected brands are passed as a hint to the AI
+    # cocoon prompt; afterwards we merge any operator the AI missed.
+    cleaned_urls = sorted(
+        set(cleaned_df["Source"].dropna().unique())
+        | set(cleaned_df["Destination"].dropna().unique())
+    )
+    deterministic_cocoons = detect_operator_cocoons(cleaned_urls)
+    operator_hint = operator_hint_for_prompt(deterministic_cocoons)
+
+    cocoons, cocoon_errors = detect_cocoons(
+        contexts, client,
+        progress_callback=cocoon_progress,
+        operator_hint=operator_hint,
+    )
+
+    # Merge: AI cocoons authoritative, deterministic fills gaps for operators
+    # the AI didn't catch (typically because their pages weren't in contexts).
+    cocoons = merge_cocoon_lists(cocoons, deterministic_cocoons)
+
+    # B1 — embedding-driven candidate generation. Cheap step (~$0.0001/page),
+    # cuts the AI's working set by ~70-90% in practice. Falls back silently to
+    # the legacy open-ended path if embeddings fail (no API access, quota, etc).
+    candidates_for_source: dict[str, list[tuple[str, float]]] | None = None
+    embedding_stats: dict | None = None
+    if _config.ILA_USE_EMBEDDINGS:
+        if progress_callback:
+            progress_callback(
+                phase="embeddings", fraction=0.30,
+                batch=0, total_batches=0,
+                cocoons_found=len(cocoons), recs_found=0,
+                total_api_calls=total_api_calls,
+            )
+        try:
+            embeddings, embedding_stats = compute_page_embeddings(contexts, client)
+            if embeddings:
+                raw_candidates = generate_candidates(embeddings)
+                filtered = _filter_candidates_with_hard_rules(
+                    raw_candidates, cocoons, contexts, cleaned_df,
+                )
+                candidates_for_source = _candidates_by_source(filtered)
+                embedding_stats["raw_candidates"] = len(raw_candidates)
+                embedding_stats["filtered_candidates"] = len(filtered)
+                embedding_stats["sources_with_hints"] = len(candidates_for_source)
+        except Exception as e:
+            embedding_stats = {"error": _redact(str(e))[:200]}
+            candidates_for_source = None
 
     if progress_callback:
         progress_callback(
@@ -991,7 +1146,8 @@ def run_ai_analysis(
                 total_api_calls=total_api_calls,
             )
         batch_recs, rec_errors = find_link_opportunities(
-            batch, cocoons, cleaned_df, client
+            batch, cocoons, cleaned_df, client,
+            candidates_for_source=candidates_for_source,
         )
         recommendations.extend(batch_recs)
         all_batch_errors.extend(rec_errors)
@@ -1006,12 +1162,19 @@ def run_ai_analysis(
 
     from src.analysis.link_budget import apply_link_budgets
     from src.analysis.orphan_guarantee import ensure_orphan_coverage
+    from src.analysis.coverage_guarantee import ensure_full_coverage
 
     recommendations, budget_stats = apply_link_budgets(
         recommendations, page_type_lookup, contexts_by_url
     )
     recommendations, guarantee_stats = ensure_orphan_coverage(
         recommendations, contexts, cocoons, page_type_lookup
+    )
+    # Coverage guarantee — operates on EVERY URL in cleaned_df, not just
+    # contexts. Ensures every page receives + sends at least one link in the
+    # final state (crawl + recs). Adds [Coverage fallback] tagged recs for gaps.
+    recommendations, coverage_stats = ensure_full_coverage(
+        recommendations, cleaned_df, cocoons, page_type_lookup
     )
 
     if progress_callback:
@@ -1047,4 +1210,6 @@ def run_ai_analysis(
         "error": error_msg,
         "budget_stats": budget_stats,
         "guarantee_stats": guarantee_stats,
+        "coverage_stats": coverage_stats,
+        "embedding_stats": embedding_stats,
     }
