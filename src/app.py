@@ -73,6 +73,28 @@ st.set_page_config(
 apply_bc_theme()
 
 
+@st.cache_resource
+def _deploy_version() -> str:
+    """Best-effort short commit hash so the UI can show which build is live."""
+    import subprocess
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parent.parent
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=repo_root,
+            capture_output=True, text=True, timeout=2,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return "unknown"
+
+
+_DEPLOY_VERSION = _deploy_version()
+
+
 # Initialize session state
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
@@ -154,6 +176,11 @@ def render_login():
                 st.rerun()
             else:
                 st.error("Incorrect password.")
+
+        st.markdown(
+            f"<p style='text-align:center; opacity:0.4; font-size:11px; margin-top:24px; font-family:monospace;'>build {_DEPLOY_VERSION}</p>",
+            unsafe_allow_html=True,
+        )
 
 
 # ============================================================

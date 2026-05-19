@@ -1287,98 +1287,123 @@ def score_link_pairs(
                 text = _call_gemini(client, prompt, cached_content=cache_name)
                 result = json.loads(text)
                 scores = _extract_list(result, "scores")
-
-                for s in scores:
-                    if not isinstance(s, dict):
-                        continue
-                    idx = s.get("index")
-                    if not isinstance(idx, int) or idx < 0 or idx >= len(pair_meta):
-                        continue
-                    score = s.get("score", 0)
-                    if not isinstance(score, (int, float)) or score < threshold:
-                        continue
-
-                    src, tgt, sim = pair_meta[idx]
-
-                    # Defensive revalidation
-                    if src == tgt or (src, tgt) in existing_links:
-                        continue
-                    if src not in known_urls or tgt not in known_urls:
-                        continue
-
-                    src_ctx = ctx_by_url.get(src)
-                    tgt_ctx = ctx_by_url.get(tgt)
-                    src_ops = operators_for_url.get(src, [])
-                    tgt_ops = operators_for_url.get(tgt, [])
-                    is_multi_op_src = len(src_ops) > 1 or src in multi_operator_urls
-                    target_review = None
-                    for op in tgt_ops:
-                        if review_page_by_op.get(op):
-                            target_review = review_page_by_op[op]
-                            break
-
-                    scored = score_pair(
-                        source_url=src,
-                        target_url=tgt,
-                        source_ctx=src_ctx,
-                        target_ctx=tgt_ctx,
-                        source_cocoons=src_ops,
-                        target_cocoons=tgt_ops,
-                        source_type=page_type_lookup.get(src),
-                        target_type=page_type_lookup.get(tgt),
-                        target_code_page=code_page_by_url.get(tgt),
-                        target_review_page=target_review,
-                        existing_links=existing_links,
-                        target_keyword=(tgt_ctx.get("target_keyword") if tgt_ctx else None),
-                        target_inbound_anchors=(tgt_ctx.get("inbound_anchors") if tgt_ctx else None),
-                        is_multi_operator_source=is_multi_op_src,
-                        target_is_past_event=is_past_event(
-                            tgt,
-                            page_type=page_type_lookup.get(tgt),
-                            target_keyword=(tgt_ctx.get("target_keyword") if tgt_ctx else None),
-                        ),
-                        source_section=extract_lang_segment(src),
-                        target_section=extract_lang_segment(tgt),
-                        source_market=market_for_url(src),
-                        target_market=market_for_url(tgt),
-                    )
-                    if not scored["passed"]:
-                        continue
-
-                    anchor = (s.get("anchor") or "").strip() or _fallback_anchor(tgt_ctx, tgt)
-                    priority = s.get("priority", "medium")
-                    if priority not in ("high", "medium", "low"):
-                        priority = "medium"
-
-                    all_recs.append({
-                        "source_url": src,
-                        "target_url": tgt,
-                        "suggested_anchor": anchor,
-                        "reason": s.get("reason", ""),
-                        "priority": priority,
-                        "relevance_score": scored["score"],
-                        "ai_score": int(score),
-                    })
-                break  # success, no retry
             except Exception as e:
                 if attempt == 0:
                     time.sleep(3)
                     continue
-                # Capture the deepest frame inside our own code so we can
-                # see WHERE the exception originated — generic exception
-                # types like AttributeError tell us nothing without it.
-                tb = traceback.extract_tb(e.__traceback__)
+                batch_errors.append(
+                    f"Scoring batch {batch_idx+1} (call/parse): "
+                    f"{type(e).__name__}: {_redact(str(e))}"
+                )
+                scores = []
+                break
+            else:
+                break  # _call_gemini + json.loads succeeded
+
+        # Per-pair processing wrapped individually so one malformed item
+        # can't kill the rest of the batch. Captures the deepest in-project
+        # frame so we know WHERE the exception originated.
+        per_pair_errors: list[str] = []
+        for s in scores:
+            try:
+                if not isinstance(s, dict):
+                    continue
+                idx = s.get("index")
+                if not isinstance(idx, int) or idx < 0 or idx >= len(pair_meta):
+                    continue
+                score = s.get("score", 0)
+                if not isinstance(score, (int, float)) or score < threshold:
+                    continue
+
+                src, tgt, sim = pair_meta[idx]
+
+                # Defensive revalidation
+                if src == tgt or (src, tgt) in existing_links:
+                    continue
+                if src not in known_urls or tgt not in known_urls:
+                    continue
+
+                src_ctx = ctx_by_url.get(src)
+                tgt_ctx = ctx_by_url.get(tgt)
+                src_ops = operators_for_url.get(src, [])
+                tgt_ops = operators_for_url.get(tgt, [])
+                is_multi_op_src = len(src_ops) > 1 or src in multi_operator_urls
+                target_review = None
+                for op in tgt_ops:
+                    if review_page_by_op.get(op):
+                        target_review = review_page_by_op[op]
+                        break
+
+                scored = score_pair(
+                    source_url=src,
+                    target_url=tgt,
+                    source_ctx=src_ctx,
+                    target_ctx=tgt_ctx,
+                    source_cocoons=src_ops,
+                    target_cocoons=tgt_ops,
+                    source_type=page_type_lookup.get(src),
+                    target_type=page_type_lookup.get(tgt),
+                    target_code_page=code_page_by_url.get(tgt),
+                    target_review_page=target_review,
+                    existing_links=existing_links,
+                    target_keyword=(tgt_ctx.get("target_keyword") if isinstance(tgt_ctx, dict) else None),
+                    target_inbound_anchors=(tgt_ctx.get("inbound_anchors") if isinstance(tgt_ctx, dict) else None),
+                    is_multi_operator_source=is_multi_op_src,
+                    target_is_past_event=is_past_event(
+                        tgt,
+                        page_type=page_type_lookup.get(tgt),
+                        target_keyword=(tgt_ctx.get("target_keyword") if isinstance(tgt_ctx, dict) else None),
+                    ),
+                    source_section=extract_lang_segment(src),
+                    target_section=extract_lang_segment(tgt),
+                    source_market=market_for_url(src),
+                    target_market=market_for_url(tgt),
+                )
+                if not scored["passed"]:
+                    continue
+
+                anchor_raw = s.get("anchor")
+                if isinstance(anchor_raw, list):
+                    anchor_raw = " ".join(str(x) for x in anchor_raw if x)
+                anchor = (str(anchor_raw or "")).strip() or _fallback_anchor(tgt_ctx if isinstance(tgt_ctx, dict) else None, tgt)
+                priority = s.get("priority", "medium")
+                if not isinstance(priority, str) or priority not in ("high", "medium", "low"):
+                    priority = "medium"
+
+                all_recs.append({
+                    "source_url": src,
+                    "target_url": tgt,
+                    "suggested_anchor": anchor,
+                    "reason": str(s.get("reason", "")),
+                    "priority": priority,
+                    "relevance_score": scored["score"],
+                    "ai_score": int(score),
+                })
+            except Exception as pair_exc:
+                tb = traceback.extract_tb(pair_exc.__traceback__)
                 our_frames = [f for f in tb if "/src/" in f.filename]
                 location = ""
                 if our_frames:
                     last = our_frames[-1]
                     fname = last.filename.split("/src/", 1)[-1]
                     location = f" [{fname}:{last.lineno}]"
-                batch_errors.append(
-                    f"Scoring batch {batch_idx+1}: "
-                    f"{type(e).__name__}: {_redact(str(e))}{location}"
+                per_pair_errors.append(
+                    f"{type(pair_exc).__name__}: {_redact(str(pair_exc))}{location}"
                 )
-                break
+
+        if per_pair_errors:
+            # Summarize: show the first 3 unique errors + a count. One pair
+            # failing is now a soft signal, not a batch-killing crash.
+            seen: list[str] = []
+            for err in per_pair_errors:
+                if err not in seen:
+                    seen.append(err)
+                if len(seen) >= 3:
+                    break
+            batch_errors.append(
+                f"Scoring batch {batch_idx+1}: {len(per_pair_errors)} pair(s) failed — "
+                + "; ".join(seen)
+            )
 
     # Best-effort cache cleanup. Orphan caches expire on Gemini's side after
     # the TTL, so a missed delete here is at worst a small server-side cost.
