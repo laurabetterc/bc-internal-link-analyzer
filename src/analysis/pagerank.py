@@ -50,18 +50,52 @@ def compute_pagerank(df: pd.DataFrame) -> dict[str, float]:
     return scores
 
 
-def compute_weighted_pagerank(df: pd.DataFrame) -> dict[str, float]:
+def _is_follow_link(value) -> bool:
+    """Screaming Frog's Follow column can be 'True'/'False' (string) or bool.
+    Treats missing/unknown as follow (the safe default — don't silently strip
+    PR from links we can't classify)."""
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return value
+    s = str(value).strip().lower()
+    if s in ("false", "no", "0", "nofollow"):
+        return False
+    return True
+
+
+def compute_weighted_pagerank(
+    df: pd.DataFrame,
+    external_link_counts: dict[str, int] | None = None,
+) -> dict[str, float]:
     """PageRank weighted by Link Position (v2 — content > sidebar > nav > footer).
 
     Falls back to basic PR if `Link Position` isn't available. When multiple
     edges connect the same source → target (e.g., one content link + one
     footer link to the same page), their weights sum so the strongest edge
     wins without artificially deduplicating.
+
+    `Follow` column (if present): nofollow links don't pass PR — their edge
+    weight is set to 0. Treats missing/unknown values as follow (safe default).
+
+    `external_link_counts`: optional dict of source URL → outbound external
+    link count (links to other domains, filtered out before this point in the
+    pipeline). When provided, internal edge weights from each source are
+    diluted by the fraction of its links that point externally — a page
+    losing PR to many external destinations passes proportionally less to
+    each internal neighbour.
     """
     if "Link Position" not in df.columns:
         return compute_pagerank(df)
 
     weights = df["Link Position"].map(LINK_POSITION_WEIGHTS).fillna(DEFAULT_LINK_WEIGHT)
+
+    if "Follow" in df.columns:
+        follow_mask = df["Follow"].apply(_is_follow_link)
+        # Nofollow → zero weight (no PR transfer). Keep the edge in the
+        # graph so the source page still appears as a node.
+        weights = weights.where(follow_mask, 0.0)
+
     edges_df = pd.DataFrame({
         "Source": df["Source"],
         "Destination": df["Destination"],
@@ -69,6 +103,22 @@ def compute_weighted_pagerank(df: pd.DataFrame) -> dict[str, float]:
     })
     # Sum per (source, target) so duplicate edges combine instead of overwrite.
     edges_df = edges_df.groupby(["Source", "Destination"], as_index=False)["weight"].sum()
+
+    # External-link dilution: scale each source's outbound edge weights by
+    # the proportion of its links that are internal. If a page links to 10
+    # internal pages and 90 external ones, its internal edges carry only
+    # 10/100 = 0.1 of their nominal weight.
+    if external_link_counts:
+        internal_counts = edges_df.groupby("Source")["weight"].count().to_dict()
+        dilution: dict[str, float] = {}
+        for src, internal_n in internal_counts.items():
+            ext_n = external_link_counts.get(src, 0)
+            total = internal_n + ext_n
+            dilution[src] = internal_n / total if total > 0 else 1.0
+        edges_df["weight"] = edges_df.apply(
+            lambda r: r["weight"] * dilution.get(r["Source"], 1.0),
+            axis=1,
+        )
 
     G = nx.DiGraph()
     for _, row in edges_df.iterrows():

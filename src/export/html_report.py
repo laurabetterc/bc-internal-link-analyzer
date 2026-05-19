@@ -63,6 +63,8 @@ def generate_html_report(
     recommendations: list[dict],
     token_usage: dict | None,
     redirect_candidates: list[dict] | None = None,
+    removal_candidates: list[dict] | None = None,
+    update_candidates: list[dict] | None = None,
 ) -> str:
     """Generate a self-contained HTML report with all analysis results.
 
@@ -252,6 +254,59 @@ def generate_html_report(
         {_table_html(["", "Source URL", "Target URL", "Anchor", "Target", "Section", "Score", "Reason"], rec_rows, max_height="600px")}
         """
 
+    # --- Removal candidates (hard-fail + swap) ---
+    removal_section = ""
+    if removal_candidates:
+        hard_fails = [c for c in removal_candidates if c.get("removal_type") == "hard_fail"]
+        swaps = [c for c in removal_candidates if c.get("removal_type") == "swap"]
+        removal_rows = []
+        for cand in removal_candidates:
+            kind = "Hard-fail" if cand.get("removal_type") == "hard_fail" else "Swap"
+            removal_rows.append([
+                kind,
+                cand.get("source_url", ""),
+                cand.get("target_url", ""),
+                cand.get("anchor", ""),
+                str(cand.get("relevance_score", 0)),
+                cand.get("reason", ""),
+            ])
+        removal_section = f"""
+        <h2 style="margin-top:48px;">Links to remove (review)</h2>
+        <p style="color:#94A3B8;font-size:14px;margin-bottom:16px;">
+            <strong style="color:#F0F4F8;">{len(removal_candidates)}</strong>
+            existing internal links flagged for removal review:
+            <strong style="color:#F87171;">{len(hard_fails)}</strong> hard-fail
+            (cross-cocoon / cross-section / past-event) and
+            <strong style="color:#FBBF24;">{len(swaps)}</strong> swap candidates
+            (lowest-scoring live links on over-budget sources where a higher-
+            scoring rec is proposed). Nothing is auto-executed — the SEO
+            Content Manager reviews and decides.</p>
+        {_table_html(["Kind", "Source URL", "Target URL", "Anchor", "Score", "Reason"], removal_rows, max_height="500px")}
+        """
+
+    # --- Update candidates (weak anchors) ---
+    update_section = ""
+    if update_candidates:
+        update_rows = []
+        for cand in update_candidates:
+            update_rows.append([
+                cand.get("source_url", ""),
+                cand.get("target_url", ""),
+                cand.get("existing_anchor", ""),
+                cand.get("suggested_anchor", ""),
+                cand.get("reason", ""),
+            ])
+        update_section = f"""
+        <h2 style="margin-top:48px;">Anchors to update (review)</h2>
+        <p style="color:#94A3B8;font-size:14px;margin-bottom:16px;">
+            <strong style="color:#F0F4F8;">{len(update_candidates)}</strong>
+            existing internal links use weak anchors (generic, empty, domain-only).
+            Replacing them with target-keyword anchors helps both SEO (clearer
+            topical signal) and accessibility. Anchors are suggested from the
+            target's priority keyword when available, else from the URL slug.</p>
+        {_table_html(["Source URL", "Target URL", "Existing anchor", "Suggested anchor", "Reason"], update_rows, max_height="500px")}
+        """
+
     # --- C3 — Recurring-event redirect candidates ---
     redirect_section = ""
     if redirect_candidates:
@@ -432,6 +487,12 @@ def generate_html_report(
 
         <!-- AI Recommendations -->
         {recs_section}
+
+        <!-- Links to remove (review) -->
+        {removal_section}
+
+        <!-- Anchors to update (review) -->
+        {update_section}
 
         <!-- Past-edition redirect candidates (C3) -->
         {redirect_section}

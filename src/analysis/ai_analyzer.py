@@ -176,12 +176,18 @@ def _call_gemini(
     max_tokens: int | None = None,
     max_retries: int = 3,
     model: str | None = None,
+    cached_content: str | None = None,
 ) -> str:
     """Call Gemini and return the text response. Tracks token usage.
 
     Handles rate limits (429) with exponential backoff. `model` defaults to
     `_config.GEMINI_MODEL` — pass a different value (e.g. via `_cocoon_model()`)
     to route a specific call to a different tier (C1).
+
+    `cached_content` (B4): cache name from `client.caches.create(...)`.
+    When provided, the cache's contents/systemInstruction are reused on the
+    server side at ~10x cheaper input pricing; `prompt` should contain only
+    the per-call dynamic portion.
     """
     if max_tokens is None:
         max_tokens = _config.GEMINI_MAX_OUTPUT_TOKENS
@@ -194,6 +200,8 @@ def _call_gemini(
         "temperature": 0.2,
         "response_mime_type": "application/json",
     }
+    if cached_content:
+        cfg["cached_content"] = cached_content
     thinking = _thinking_config_for_model(chosen_model)
     if thinking is not None:
         cfg["thinking_config"] = thinking
@@ -281,8 +289,11 @@ def prepare_page_contexts(
             linked_to_interesting.update(outbound.loc[url, "outbound_targets"][:5])
 
     all_interesting = interesting | linked_to_interesting
-    # Cap at 500 to keep costs reasonable while covering more orphans
-    max_pages = 500
+    # B9 — Cap depends on the active path. Legacy open-ended pays per-page
+    # AI cost so we keep the defensive 500-cap. Closed-task scoring decouples
+    # cost from page count (cost scales with candidates, not pages), so we
+    # let the working set breathe (10K = effectively unlimited).
+    max_pages = _config.max_ai_pages()
     if len(all_interesting) > max_pages:
         # Prioritize: priority URLs first, then orphans + true orphans (they need links most),
         # then top PR pages, then linked neighbors
@@ -685,13 +696,14 @@ def _filter_candidates_with_hard_rules(
         if s_mkt and t_mkt and s_mkt != t_mkt:
             continue
 
-        # Cross-cocoon (allowed when source is multi-operator)
+        # Cross-cocoon — block when source and target share no cocoon.
+        # Multi-operator sources can still link inside any cocoon they
+        # cover (set intersection catches that); they CAN'T jump to a
+        # cocoon they don't cover. Matches the rule in `score_pair`.
         s_ops = operators_for_url.get(src, [])
         t_ops = operators_for_url.get(tgt, [])
         if s_ops and t_ops:
-            same_cocoon = bool(set(s_ops) & set(t_ops))
-            is_multi_op_src = len(s_ops) > 1 or src in multi_op_urls
-            if not same_cocoon and not is_multi_op_src:
+            if not (set(s_ops) & set(t_ops)):
                 continue
 
         out.append((src, tgt, sim))
@@ -1000,6 +1012,360 @@ Find as many relevant opportunities as you can (aim for 5-15 per batch). ORPHANS
     return all_recommendations, batch_errors
 
 
+# --------------------------------------------------------------------------- #
+# B3 — closed-task per-pair scorer
+# --------------------------------------------------------------------------- #
+
+
+_SCORING_RUBRIC = """You are an SEO scorer for internal links on a sports betting / casino affiliate site.
+
+Each pair below has already been pre-screened to share the same cocoon (or be a multi-operator source), the same language section, the same market — and is not an existing link or self-link. Your job is to score 0-100 whether the link SHOULD exist.
+
+Scoring rubric:
+- 90-100: Strong — same cluster, target is high-priority / orphan / code-page in a relevant cocoon
+- 75-89: Solid — semantically related, fits the cocoon's funnel (siblings → review → code)
+- 60-74: Useful — topically valid, lower urgency
+- 0-59: Reject — weak topical match, redundant, or rule violation
+
+Scoring rules:
+1. Orphan rule: target marked ORPHAN must score >= 60 if topically valid (every orphan needs at least one inbound link).
+2. Cocoon funnel: the code page is the PR destination. Siblings → review → code is the right pattern, not every sibling → code mechanically.
+3. Cluster proximity: prefer same-cluster pairs. Bonus cluster (code+bonus+registration), mobile (app+streaming), money (payment+cashout), betting (odds+sport), trust (review+customer-service).
+4. Comparator/multi-op topic → target page type:
+   - "best betting sites" / listicles / "top X" → review or code
+   - "vs" pages → review (highest-PR sibling)
+   - "best app" → app; "best payment" → payment; "best bonus" → code/bonus
+   - "best for [sport]" → sport-specific page else review
+   - News mentioning operators → review (never code)
+5. Past-event timely pages → score very low (will be 301'd anyway).
+6. Anchor diversity: vary anchor style across the batch.
+   ~30% branded ("bet365"), ~30% partial-match ("bet365 review"), ~20% generic ("see more"), ~20% long-tail. Never use "click here".
+
+For each pair, return: index, score (0-100), anchor (string — keep it natural and varied; "" when score < 60), priority (one of "high"|"medium"|"low"), reason (1 sentence).
+
+Priority guidance:
+- "high": orphan target, or high-PR target needing more inbound, or strong-intent code-page link
+- "medium": cocoon-strengthening, comparator → relevant target
+- "low": nice-to-have, semantically valid but low urgency
+"""
+
+
+def _fallback_anchor(ctx: dict | None, url: str) -> str:
+    """Anchor when the AI scored a pair >=60 but returned an empty anchor."""
+    if ctx and ctx.get("target_keyword"):
+        return ctx["target_keyword"]
+    try:
+        slug = urlparse(url).path.rstrip("/").rsplit("/", 1)[-1]
+        if slug:
+            return slug.replace("-", " ").replace("_", " ")
+    except Exception:
+        pass
+    return "see more"
+
+
+_CACHE_MIN_CONTENT_CHARS = 3500  # ~875 tokens — under Flash-Lite's 1024-token min
+_CACHE_TTL_SECONDS = 900  # 15 minutes — covers even slow runs on 5K-page sites
+
+
+def _create_score_cache(
+    client: genai.Client,
+    model: str,
+    static_content: str,
+) -> str | None:
+    """Create a context cache for the scoring rubric + cocoon summary.
+
+    Returns the cache name on success, None when caching isn't viable
+    (content too small, model doesn't support caching, quota, etc.).
+    Always non-fatal: on any error we fall back to non-cached calls.
+    """
+    if not _config.ILA_USE_CONTEXT_CACHE:
+        return None
+    if len(static_content) < _CACHE_MIN_CONTENT_CHARS:
+        # Too short to be worth caching AND likely under Gemini's min token
+        # size, which would error. Skip silently.
+        return None
+    try:
+        from google.genai import types as gt
+        cache = client.caches.create(
+            model=model,
+            config=gt.CreateCachedContentConfig(
+                system_instruction=static_content,
+                ttl=f"{_CACHE_TTL_SECONDS}s",
+                display_name="ila-score-rubric",
+            ),
+        )
+        return cache.name
+    except Exception:
+        # Min size, unsupported model, quota — fall back to non-cached.
+        return None
+
+
+def _delete_cache_quiet(client: genai.Client, cache_name: str | None) -> None:
+    """Best-effort cache cleanup. Never raises."""
+    if not cache_name:
+        return
+    try:
+        client.caches.delete(name=cache_name)
+    except Exception:
+        pass
+
+
+def score_link_pairs(
+    candidates: list[tuple[str, str, float]],
+    contexts: list[dict],
+    cocoons: list[dict],
+    cleaned_df: pd.DataFrame,
+    client: genai.Client,
+    progress_callback=None,
+) -> tuple[list[dict], list[str]]:
+    """B3 — closed-task per-pair scorer.
+
+    Replaces the open-ended `find_link_opportunities` exploration path when
+    embeddings + closed-task mode are on. Each AI call receives a batch of
+    (source, target, similarity) pairs + the scoring rubric + a compact
+    cocoon summary, and returns score + anchor + reason per pair. Pairs
+    scoring below `ILA_SCORE_THRESHOLD` (default 60) are dropped.
+
+    Output shape matches `find_link_opportunities` so downstream passes
+    (link_budget, orphan_guarantee, coverage_guarantee, exports) don't
+    need changes.
+    """
+    if not candidates:
+        return [], []
+
+    # ---------- lookups (mirror find_link_opportunities) ----------
+    ctx_by_url = {c["url"]: c for c in contexts}
+    page_type_lookup: dict[str, str] = {}
+    operators_for_url: dict[str, list[str]] = {}
+    code_page_by_url: dict[str, str | None] = {}
+    review_page_by_op: dict[str, str | None] = {}
+    for cocoon in cocoons:
+        op = cocoon.get("operator", "")
+        code = cocoon.get("code_page")
+        for url, ptype in cocoon.get("page_types", {}).items():
+            if ptype and url not in page_type_lookup:
+                page_type_lookup[url] = ptype
+        for url in cocoon.get("pages", []):
+            operators_for_url.setdefault(url, []).append(op)
+            if url not in code_page_by_url:
+                code_page_by_url[url] = code
+            if cocoon.get("page_types", {}).get(url) == "review":
+                review_page_by_op[op] = url
+    multi_operator_urls = (cocoons[0].get("_multi_operator_urls", {}) if cocoons else {})
+    existing_links = set(zip(cleaned_df["Source"].tolist(), cleaned_df["Destination"].tolist()))
+    known_urls = (
+        set(cleaned_df["Source"].dropna().unique())
+        | set(cleaned_df["Destination"].dropna().unique())
+    )
+    known_urls.update(c["url"] for c in contexts)
+
+    # Cocoon summary (cap for prompt size on huge multi-language sites)
+    cocoon_lines = []
+    for c in cocoons[:50]:
+        op = c.get("operator", "")
+        n = len(c.get("pages", []))
+        code = c.get("code_page")
+        cocoon_lines.append(
+            f"- {op}: {n} pages" + (f" (code: {code})" if code else "")
+        )
+    cocoon_summary = (
+        "Cocoons in this run:\n" + "\n".join(cocoon_lines)
+        if cocoon_lines else ""
+    )
+
+    batch_size = _config.AI_SCORE_BATCH_SIZE
+    threshold = _config.ILA_SCORE_THRESHOLD
+    batches = [candidates[i:i + batch_size] for i in range(0, len(candidates), batch_size)]
+
+    # B4 — context cache for the static parts (rubric + cocoon summary).
+    # Cached input is ~10x cheaper than regular input on Gemini. The cache is
+    # created against the recommendation model (whatever the user picked),
+    # held across all scoring batches, then deleted in `finally`.
+    static_content = (
+        f"{_SCORING_RUBRIC}\n\n"
+        f"{cocoon_summary}"
+    )
+    cache_name = _create_score_cache(
+        client=client,
+        model=_config.GEMINI_MODEL,
+        static_content=static_content,
+    )
+
+    all_recs: list[dict] = []
+    batch_errors: list[str] = []
+
+    for batch_idx, batch in enumerate(batches):
+        if progress_callback:
+            progress_callback(
+                batch=batch_idx + 1,
+                total_batches=len(batches),
+                recs_so_far=len(all_recs),
+            )
+
+        # ---------- per-pair payload ----------
+        pair_lines = []
+        pair_meta: list[tuple[str, str, float]] = []
+        for idx, (src, tgt, sim) in enumerate(batch):
+            src_type = page_type_lookup.get(src, "?")
+            tgt_type = page_type_lookup.get(tgt, "?")
+            tgt_ctx = ctx_by_url.get(tgt) or {}
+
+            flags = []
+            if tgt_ctx.get("is_orphan") or tgt_ctx.get("is_true_orphan"):
+                flags.append("ORPHAN")
+            if tgt_ctx.get("is_priority"):
+                flags.append("PRIORITY")
+            tgt_kw = tgt_ctx.get("target_keyword")
+            if tgt_kw:
+                flags.append(f'kw="{tgt_kw}"')
+
+            src_ops = operators_for_url.get(src, [])
+            tgt_ops = operators_for_url.get(tgt, [])
+            cocoon_hint = ""
+            if src_ops and tgt_ops:
+                same = set(src_ops) & set(tgt_ops)
+                if same:
+                    cocoon_hint = f" cocoon={','.join(sorted(same))}"
+                elif len(src_ops) > 1 or src in multi_operator_urls:
+                    cocoon_hint = (
+                        f" cocoon=[multi-op: {','.join(src_ops)} → {','.join(tgt_ops)}]"
+                    )
+
+            flag_str = f"  [{' | '.join(flags)}]" if flags else ""
+            pair_lines.append(
+                f"[{idx}] {src} ({src_type}) → {tgt} ({tgt_type})"
+                f"  sim={sim:.2f}{cocoon_hint}{flag_str}"
+            )
+            pair_meta.append((src, tgt, sim))
+
+        # When the cache exists, the rubric + cocoon summary live server-side
+        # via `cached_content`; per-batch prompt is just the dynamic part.
+        if cache_name:
+            prompt = (
+                f"Pairs to score:\n\n"
+                f"{chr(10).join(pair_lines)}\n\n"
+                f"Respond with a JSON object:\n"
+                f"{{\n"
+                f'  "scores": [\n'
+                f'    {{"index": 0, "score": 88, "anchor": "...", "priority": "high", "reason": "..."}},\n'
+                f'    {{"index": 1, "score": 0, "anchor": "", "priority": "low", "reason": "..."}}\n'
+                f"  ]\n"
+                f"}}\n\n"
+                f"Score every pair. Use the exact indices provided."
+            )
+        else:
+            prompt = (
+                f"{_SCORING_RUBRIC}\n\n"
+                f"{cocoon_summary}\n\n"
+                f"Pairs to score:\n\n"
+                f"{chr(10).join(pair_lines)}\n\n"
+                f"Respond with a JSON object:\n"
+                f"{{\n"
+                f'  "scores": [\n'
+                f'    {{"index": 0, "score": 88, "anchor": "...", "priority": "high", "reason": "..."}},\n'
+                f'    {{"index": 1, "score": 0, "anchor": "", "priority": "low", "reason": "..."}}\n'
+                f"  ]\n"
+                f"}}\n\n"
+                f"Score every pair. Use the exact indices provided."
+            )
+
+        for attempt in range(2):
+            try:
+                text = _call_gemini(client, prompt, cached_content=cache_name)
+                result = json.loads(text)
+                scores = result.get("scores", [])
+
+                for s in scores:
+                    idx = s.get("index")
+                    if not isinstance(idx, int) or idx < 0 or idx >= len(pair_meta):
+                        continue
+                    score = s.get("score", 0)
+                    if not isinstance(score, (int, float)) or score < threshold:
+                        continue
+
+                    src, tgt, sim = pair_meta[idx]
+
+                    # Defensive revalidation
+                    if src == tgt or (src, tgt) in existing_links:
+                        continue
+                    if src not in known_urls or tgt not in known_urls:
+                        continue
+
+                    src_ctx = ctx_by_url.get(src)
+                    tgt_ctx = ctx_by_url.get(tgt)
+                    src_ops = operators_for_url.get(src, [])
+                    tgt_ops = operators_for_url.get(tgt, [])
+                    is_multi_op_src = len(src_ops) > 1 or src in multi_operator_urls
+                    target_review = None
+                    for op in tgt_ops:
+                        if review_page_by_op.get(op):
+                            target_review = review_page_by_op[op]
+                            break
+
+                    scored = score_pair(
+                        source_url=src,
+                        target_url=tgt,
+                        source_ctx=src_ctx,
+                        target_ctx=tgt_ctx,
+                        source_cocoons=src_ops,
+                        target_cocoons=tgt_ops,
+                        source_type=page_type_lookup.get(src),
+                        target_type=page_type_lookup.get(tgt),
+                        target_code_page=code_page_by_url.get(tgt),
+                        target_review_page=target_review,
+                        existing_links=existing_links,
+                        target_keyword=(tgt_ctx.get("target_keyword") if tgt_ctx else None),
+                        target_inbound_anchors=(tgt_ctx.get("inbound_anchors") if tgt_ctx else None),
+                        is_multi_operator_source=is_multi_op_src,
+                        target_is_past_event=is_past_event(
+                            tgt,
+                            page_type=page_type_lookup.get(tgt),
+                            target_keyword=(tgt_ctx.get("target_keyword") if tgt_ctx else None),
+                        ),
+                        source_section=extract_lang_segment(src),
+                        target_section=extract_lang_segment(tgt),
+                        source_market=market_for_url(src),
+                        target_market=market_for_url(tgt),
+                    )
+                    if not scored["passed"]:
+                        continue
+
+                    anchor = (s.get("anchor") or "").strip() or _fallback_anchor(tgt_ctx, tgt)
+                    priority = s.get("priority", "medium")
+                    if priority not in ("high", "medium", "low"):
+                        priority = "medium"
+
+                    all_recs.append({
+                        "source_url": src,
+                        "target_url": tgt,
+                        "suggested_anchor": anchor,
+                        "reason": s.get("reason", ""),
+                        "priority": priority,
+                        "relevance_score": scored["score"],
+                        "ai_score": int(score),
+                    })
+                break  # success, no retry
+            except Exception as e:
+                if attempt == 0:
+                    time.sleep(3)
+                    continue
+                batch_errors.append(f"Scoring batch {batch_idx+1}: {_redact(str(e))}")
+                break
+
+    # Best-effort cache cleanup. Orphan caches expire on Gemini's side after
+    # the TTL, so a missed delete here is at worst a small server-side cost.
+    _delete_cache_quiet(client, cache_name)
+
+    # Stash cache status for `run_ai_analysis` to surface in the result dict.
+    score_link_pairs.last_cache_used = cache_name is not None  # type: ignore[attr-defined]
+
+    return all_recs, batch_errors
+
+
+# Initialize the function-attribute so callers can read it before any run.
+score_link_pairs.last_cache_used = False  # type: ignore[attr-defined]
+
+
 def run_ai_analysis(
     cleaned_df: pd.DataFrame,
     priority_df: pd.DataFrame,
@@ -1030,6 +1396,8 @@ def run_ai_analysis(
             "recommendations": [],
             "token_usage": get_token_usage(),
             "error": "no_api_key",
+            "closed_task_used": False,
+            "score_batch_count": 0,
         }
 
     # Reset token counter for this analysis
@@ -1047,6 +1415,8 @@ def run_ai_analysis(
             "recommendations": [],
             "token_usage": get_token_usage(),
             "error": "No pages to analyze.",
+            "closed_task_used": False,
+            "score_batch_count": 0,
         }
 
     # Count total batches upfront for accurate progress
@@ -1100,6 +1470,7 @@ def run_ai_analysis(
     # cuts the AI's working set by ~70-90% in practice. Falls back silently to
     # the legacy open-ended path if embeddings fail (no API access, quota, etc).
     candidates_for_source: dict[str, list[tuple[str, float]]] | None = None
+    filtered_candidates: list[tuple[str, str, float]] = []
     embedding_stats: dict | None = None
     if _config.ILA_USE_EMBEDDINGS:
         if progress_callback:
@@ -1113,44 +1484,85 @@ def run_ai_analysis(
             embeddings, embedding_stats = compute_page_embeddings(contexts, client)
             if embeddings:
                 raw_candidates = generate_candidates(embeddings)
-                filtered = _filter_candidates_with_hard_rules(
+                filtered_candidates = _filter_candidates_with_hard_rules(
                     raw_candidates, cocoons, contexts, cleaned_df,
                 )
-                candidates_for_source = _candidates_by_source(filtered)
+                candidates_for_source = _candidates_by_source(filtered_candidates)
                 embedding_stats["raw_candidates"] = len(raw_candidates)
-                embedding_stats["filtered_candidates"] = len(filtered)
+                embedding_stats["filtered_candidates"] = len(filtered_candidates)
                 embedding_stats["sources_with_hints"] = len(candidates_for_source)
         except Exception as e:
             embedding_stats = {"error": _redact(str(e))[:200]}
             candidates_for_source = None
+            filtered_candidates = []
+
+    # B3 — closed-task scoring takes the embedding shortlist and scores each
+    # pair instead of running open-ended page-batched exploration. Active when
+    # both flags are on AND we actually have candidates to score. Otherwise
+    # fall back to the legacy `find_link_opportunities` path.
+    use_closed_task = (
+        _config.ILA_USE_EMBEDDINGS
+        and _config.ILA_USE_CLOSED_TASK
+        and len(filtered_candidates) > 0
+    )
+    if use_closed_task:
+        score_batch_count = max(
+            1,
+            (len(filtered_candidates) + _config.AI_SCORE_BATCH_SIZE - 1)
+            // _config.AI_SCORE_BATCH_SIZE,
+        )
+        # Closed-task: cocoon batches + scoring batches (no per-page rec batches).
+        total_api_calls = cocoon_batch_count + score_batch_count
+    else:
+        score_batch_count = 0
 
     if progress_callback:
         progress_callback(
             phase="recommendations", fraction=0.35,
-            batch=0, total_batches=rec_batch_count,
+            batch=0,
+            total_batches=score_batch_count if use_closed_task else rec_batch_count,
             cocoons_found=len(cocoons), recs_found=0,
             total_api_calls=total_api_calls,
         )
 
-    # Find link opportunities (batched)
-    recommendations = []
+    recommendations: list[dict] = []
     all_batch_errors = list(cocoon_errors)
-    for i, batch in enumerate(rec_batches):
-        if progress_callback:
-            # Recommendations phase: 0.35 to 0.95
-            frac = 0.35 + 0.60 * ((i + 1) / rec_batch_count)
-            progress_callback(
-                phase="recommendations", fraction=min(frac, 0.95),
-                batch=i + 1, total_batches=rec_batch_count,
-                cocoons_found=len(cocoons), recs_found=len(recommendations),
-                total_api_calls=total_api_calls,
-            )
-        batch_recs, rec_errors = find_link_opportunities(
-            batch, cocoons, cleaned_df, client,
-            candidates_for_source=candidates_for_source,
+
+    if use_closed_task:
+        def score_progress(batch, total_batches, recs_so_far):
+            if progress_callback:
+                # Scoring phase: 0.35 → 0.95
+                frac = 0.35 + 0.60 * (batch / max(total_batches, 1))
+                progress_callback(
+                    phase="recommendations", fraction=min(frac, 0.95),
+                    batch=batch, total_batches=total_batches,
+                    cocoons_found=len(cocoons), recs_found=recs_so_far,
+                    total_api_calls=total_api_calls,
+                )
+
+        recommendations, score_errors = score_link_pairs(
+            filtered_candidates, contexts, cocoons, cleaned_df, client,
+            progress_callback=score_progress,
         )
-        recommendations.extend(batch_recs)
-        all_batch_errors.extend(rec_errors)
+        all_batch_errors.extend(score_errors)
+    else:
+        # Legacy open-ended path — kept as a safety net when embeddings or
+        # closed-task are disabled (or candidate filtering produced nothing).
+        for i, batch in enumerate(rec_batches):
+            if progress_callback:
+                frac = 0.35 + 0.60 * ((i + 1) / rec_batch_count)
+                progress_callback(
+                    phase="recommendations", fraction=min(frac, 0.95),
+                    batch=i + 1, total_batches=rec_batch_count,
+                    cocoons_found=len(cocoons), recs_found=len(recommendations),
+                    total_api_calls=total_api_calls,
+                )
+            batch_recs, rec_errors = find_link_opportunities(
+                batch, cocoons, cleaned_df, client,
+                candidates_for_source=candidates_for_source,
+            )
+            recommendations.extend(batch_recs)
+            all_batch_errors.extend(rec_errors)
 
     # Post-AI passes (Steps 6 + 7): link budgets and orphan guarantee
     page_type_lookup: dict[str, str] = {}
@@ -1163,6 +1575,7 @@ def run_ai_analysis(
     from src.analysis.link_budget import apply_link_budgets
     from src.analysis.orphan_guarantee import ensure_orphan_coverage
     from src.analysis.coverage_guarantee import ensure_full_coverage
+    from src.analysis.removal_candidates import compute_removal_candidates
 
     recommendations, budget_stats = apply_link_budgets(
         recommendations, page_type_lookup, contexts_by_url
@@ -1170,11 +1583,37 @@ def run_ai_analysis(
     recommendations, guarantee_stats = ensure_orphan_coverage(
         recommendations, contexts, cocoons, page_type_lookup
     )
+    # Removal candidates — closes the original PRD's `to remove` status.
+    # Surfaces existing crawl links that fail hard rules (cross-section,
+    # cross-market, cross-cocoon), lowest-scoring live links on over-budget
+    # sources where a higher-scoring rec is proposed on the same source, AND
+    # edges pointing to 3xx/4xx/5xx destinations (stashed on df.attrs by the
+    # parser — never recommended as new but always surfaced for removal).
+    # Deterministic; no AI cost. Computed BEFORE coverage so coverage can
+    # subtract removals from the final-state gap calculation.
+    broken_links = cleaned_df.attrs.get("broken_links", []) if cleaned_df is not None else []
+    removal_candidates, removal_stats = compute_removal_candidates(
+        cleaned_df, recommendations, cocoons, page_type_lookup, contexts_by_url,
+        broken_links=broken_links,
+    )
     # Coverage guarantee — operates on EVERY URL in cleaned_df, not just
     # contexts. Ensures every page receives + sends at least one link in the
-    # final state (crawl + recs). Adds [Coverage fallback] tagged recs for gaps.
+    # final state (crawl + recs - removals). Adds [Coverage fallback] tagged
+    # recs for any gap, including gaps created by removal recommendations.
     recommendations, coverage_stats = ensure_full_coverage(
-        recommendations, cleaned_df, cocoons, page_type_lookup
+        recommendations, cleaned_df, cocoons, page_type_lookup,
+        removal_candidates=removal_candidates,
+    )
+
+    # Update candidates — weak anchors on existing crawl links ("click here",
+    # "read more", domain-name-only, etc.). Same surface-for-review pattern;
+    # never auto-execute. Skips links already in the removal index.
+    from src.analysis.update_candidates import compute_update_candidates
+    _removal_pairs = {
+        (c["source_url"], c["target_url"]) for c in removal_candidates
+    }
+    update_candidates, update_stats = compute_update_candidates(
+        cleaned_df, contexts_by_url, removal_pairs=_removal_pairs
     )
 
     if progress_callback:
@@ -1206,10 +1645,19 @@ def run_ai_analysis(
         "cocoons": cocoons,
         "recommendations": recommendations,
         "redirect_candidates": redirect_candidates,
+        "removal_candidates": removal_candidates,
+        "removal_stats": removal_stats,
+        "update_candidates": update_candidates,
+        "update_stats": update_stats,
         "token_usage": get_token_usage(),
         "error": error_msg,
         "budget_stats": budget_stats,
         "guarantee_stats": guarantee_stats,
         "coverage_stats": coverage_stats,
         "embedding_stats": embedding_stats,
+        "closed_task_used": use_closed_task,
+        "score_batch_count": score_batch_count,
+        "context_cache_used": (
+            use_closed_task and getattr(score_link_pairs, "last_cache_used", False)
+        ),
     }

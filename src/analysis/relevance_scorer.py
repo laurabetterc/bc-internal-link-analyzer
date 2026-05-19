@@ -125,8 +125,15 @@ def score_pair(
 ) -> dict:
     """Score a candidate (source, target) pair.
 
-    Returns a dict {"score": int, "passed": bool, "reason": str}.
-    Hard filters discard the pair entirely (passed=False, score=0).
+    Returns a dict {"score": int, "passed": bool, "reason": str,
+    "is_rule_violation": bool}.
+
+    `is_rule_violation` is True only when a hard linking-policy filter fires
+    (self-link, cross-section, cross-market, cross-cocoon). It stays False
+    for "link already exists" (a NEW-link signal, not a removal one) and for
+    "below threshold" (soft-score weakness — a low score on an otherwise
+    valid link is not a reason to remove it). Removal-candidate code MUST
+    gate on `is_rule_violation`, not `not passed`.
 
     `source_section` / `target_section`: ISO 639-1 or 3166-1 code for the
     URL section (e.g. "it", "mx"). When both are set and differ, the pair
@@ -139,10 +146,10 @@ def score_pair(
     """
     # ----- Hard filters -----
     if source_url == target_url:
-        return {"score": 0, "passed": False, "reason": "self-link"}
+        return {"score": 0, "passed": False, "reason": "self-link", "is_rule_violation": True}
 
     if (source_url, target_url) in existing_links:
-        return {"score": 0, "passed": False, "reason": "link already exists"}
+        return {"score": 0, "passed": False, "reason": "link already exists", "is_rule_violation": False}
 
     # B6: cross-section (language / country) link blocked. Only enforced when
     # BOTH sides have a recognized section code — None means root / no prefix,
@@ -152,6 +159,7 @@ def score_pair(
             "score": 0,
             "passed": False,
             "reason": f"cross-section link blocked (/{source_section}/ → /{target_section}/)",
+            "is_rule_violation": True,
         }
 
     # Phase 10 backlog: cross-market link blocked. Same rule shape as B6 but
@@ -161,22 +169,26 @@ def score_pair(
             "score": 0,
             "passed": False,
             "reason": f"cross-market link blocked ({source_market} → {target_market})",
+            "is_rule_violation": True,
         }
 
-    # Cross-cocoon: only allowed if source is a multi-operator page
+    # Cross-cocoon: only allowed if source and target share a cocoon.
+    # Multi-operator sources (e.g. "codere-vs-betsson", which is in BOTH
+    # the Codere and Betsson cocoons) can still link inside any cocoon
+    # they cover — set intersection handles that. They CANNOT link to
+    # operators outside their cocoon set. A genuinely-universal comparator
+    # ("best betting apps Mexico") should be cocoon-less to bypass this
+    # rule via the empty-cocoon branch above.
     if source_cocoons and target_cocoons:
         same_cocoon = bool(set(source_cocoons) & set(target_cocoons))
-        if not same_cocoon and not is_multi_operator_source:
-            return {"score": 0, "passed": False, "reason": "cross-cocoon link not allowed"}
+        if not same_cocoon:
+            return {"score": 0, "passed": False, "reason": "cross-cocoon link not allowed", "is_rule_violation": True}
 
     # ----- Soft scoring -----
     score = 0
 
-    # +40 same cocoon (or multi-op source covers target cocoon)
+    # +40 same cocoon (or multi-op source linking to one of its own cocoons)
     if source_cocoons and target_cocoons and (set(source_cocoons) & set(target_cocoons)):
-        score += 40
-    elif is_multi_operator_source and target_cocoons:
-        # Multi-op source linking to a cocoon it covers
         score += 40
 
     # Intra-cocoon proximity (replaces URL-token scoring within same cocoon)
@@ -223,4 +235,5 @@ def score_pair(
         "score": score,
         "passed": passed,
         "reason": "scored" if passed else f"below threshold (score={score})",
+        "is_rule_violation": False,
     }

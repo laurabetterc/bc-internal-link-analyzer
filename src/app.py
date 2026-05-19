@@ -603,19 +603,56 @@ def _apply_step2_filters(df: pd.DataFrame, exclude_patterns: list[str]) -> pd.Da
     return cleaned
 
 
-def _render_cost_estimate(remaining_url_count: int):
-    """Render the pre-run cost estimate panel above the Run Analysis bar."""
+def _render_cost_estimate(
+    remaining_url_count: int,
+    df: pd.DataFrame | None = None,
+    cleaned_url_set: set[str] | None = None,
+):
+    """Render the pre-run cost estimate panel above the Run Analysis bar.
+
+    When `df` is provided, predicts the AI's contexts subset size (priority
+    + orphans + top-PR + true_orphans + neighbors, capped at 500) and bills
+    against that — not the raw cleaned-page count. Fixes the 65x overcount
+    on small sites where the AI working set is much smaller than `df`.
+    `cleaned_url_set` reflects Step 2 exclusions; None means use every
+    unique URL in `df`.
+    """
     from src import config as _config
+    from src.analysis.cost_estimator import estimate_working_set_size
     model = _config.GEMINI_MODEL
-    est = estimate_cost(remaining_url_count, model=model)
+
+    working_set: int | None = None
+    if df is not None and remaining_url_count > 0:
+        all_pages = set(df["Source"].dropna().unique()) | set(df["Destination"].dropna().unique())
+        if cleaned_url_set is not None:
+            all_pages &= cleaned_url_set
+            edges = df[df["Source"].isin(cleaned_url_set) & df["Destination"].isin(cleaned_url_set)]
+        else:
+            edges = df
+        with_inbound = set(edges["Destination"].dropna().unique())
+        orphan_count = len(all_pages - with_inbound)
+        priority_df = st.session_state.get("priority_data")
+        priority_count = len(priority_df) if priority_df is not None else 0
+        full_url_list = st.session_state.get("full_url_list")
+        true_orphan_count = (
+            max(0, len(full_url_list - all_pages))
+            if full_url_list is not None else 0
+        )
+        working_set = estimate_working_set_size(
+            page_count=remaining_url_count,
+            priority_count=priority_count,
+            orphan_count=orphan_count,
+            true_orphan_count=true_orphan_count,
+        )
+    est = estimate_cost(remaining_url_count, model=model, working_set_size=working_set)
 
     cost_str = format_cost(est["total_cost"])
     cap_note = ""
     if est["page_cap_applied"]:
         cap_note = (
             f"<div style='font-size:12px;color:#94A3B8;margin-top:4px;'>"
-            f"AI page cap is {est['capped_pages']:,} (selected by priority + orphans + top PageRank). "
-            f"The estimate uses the capped count, not the {remaining_url_count:,} total.</div>"
+            f"AI will analyze ~{est['capped_pages']:,} pages (priority + orphans + top PageRank + neighbors). "
+            f"The estimate uses this subset, not the {remaining_url_count:,} total.</div>"
         )
 
     unknown_note = ""
@@ -642,11 +679,18 @@ def _render_cost_estimate(remaining_url_count: int):
 
     embedding_line = ""
     if est.get("embeddings_enabled"):
+        closed_task_note = ""
+        if _config.ILA_USE_CLOSED_TASK:
+            closed_task_note = (
+                " The AI scores each shortlisted pair (B3 closed-task) "
+                "instead of open-ended exploration."
+            )
         embedding_line = (
             f"<div style='font-size:11px;color:#64748B;margin-top:2px;'>"
             f"+ embeddings shortlist (negligible — ~"
             f"{format_cost(est['embedding_cost']) if est['embedding_cost'] >= 0.01 else '<$0.01'}"
-            f"): pre-filtered candidate pairs reduce the AI's working set.</div>"
+            f"): pre-filtered candidate pairs reduce the AI's working set."
+            f"{closed_task_note}</div>"
         )
 
     st.markdown(
@@ -1053,7 +1097,7 @@ def render_cleaning_step2():
         # Show the cost estimate even when no URL patterns exist (language /
         # news / template exclusions still affect the page count)
         unique_pages_count = pd.concat([df["Source"], df["Destination"]]).nunique()
-        _render_cost_estimate(unique_pages_count)
+        _render_cost_estimate(unique_pages_count, df=df)
         with st._bottom:
             bar_cols = st.columns([1, 3])
             with bar_cols[0]:
@@ -1246,61 +1290,53 @@ def render_cleaning_step2():
     )
 
     # ---- URL browser with selectable rows ----
+    # Full list as checkboxes in a form. No popover (multiselect bug), no
+    # scrollable inner container (data_editor wheel capture), no
+    # pagination complications. The page becomes long when the expander
+    # opens — search filter at top narrows it.
     with st.expander(f"Browse & select URLs to exclude ({len(all_urls):,} URLs)"):
         st.markdown(
             "<p style='color:#94A3B8;font-size:13px;margin-bottom:8px;'>"
-            "Search and check URLs you want to exclude. "
-            "Select as many as you need, then click <strong style='color:#F0F4F8;'>Exclude selected</strong>.</p>",
+            "Tick the URLs you want to exclude, then click "
+            "<strong style='color:#F0F4F8;'>Apply exclusions</strong>. "
+            "Use the search field to narrow the list when needed.</p>",
             unsafe_allow_html=True,
         )
 
-        # Search filter
         search_query = st.text_input(
             "Filter URLs",
-            placeholder="Type to filter URLs...",
+            placeholder="Optional: type to filter (e.g. /tag/, an operator name)…",
             key="url_browser_search",
             label_visibility="collapsed",
         )
 
-        filtered_urls = all_urls
-        if search_query:
-            filtered_urls = [u for u in all_urls if search_query.lower() in u.lower()]
-
-        if not filtered_urls:
-            st.info("No URLs match your search.")
+        if search_query and search_query.strip():
+            q = search_query.strip().lower()
+            visible_urls = [u for u in all_urls if q in u.lower()]
         else:
-            st.markdown(
-                f"<p style='color:#64748B;font-size:12px;margin-bottom:4px;'>"
-                f"Showing {len(filtered_urls):,} URLs</p>",
-                unsafe_allow_html=True,
-            )
+            visible_urls = all_urls
 
-            browser_df = pd.DataFrame({
-                "Exclude": [False] * len(filtered_urls),
-                "URL": filtered_urls,
-            })
+        st.markdown(
+            f"<p style='color:#64748B;font-size:12px;margin:0 0 8px;'>"
+            f"Showing {len(visible_urls):,} URL(s)</p>",
+            unsafe_allow_html=True,
+        )
 
-            edited_browser = st.data_editor(
-                browser_df,
-                use_container_width=True,
-                hide_index=True,
-                height=400,
-                column_config={
-                    "Exclude": st.column_config.CheckboxColumn("Exclude", width="small"),
-                    "URL": st.column_config.TextColumn("URL", width="large", disabled=True),
-                },
-                key="url_browser_editor",
-            )
-
-            # Apply button — only triggers rerun when user explicitly clicks
-            selected = set(edited_browser.loc[edited_browser["Exclude"], "URL"].tolist())
-            if selected:
-                if st.button(f"Exclude selected ({len(selected):,} URLs)", type="primary"):
-                    st.session_state.manual_excluded_urls = manual_excluded | selected
+        if not visible_urls:
+            st.info("No URLs match your filter.")
+        else:
+            with st.form("url_browser_form"):
+                picked: list[str] = []
+                for url in visible_urls:
+                    if st.checkbox(url, key=f"urlchk_{hash(url)}"):
+                        picked.append(url)
+                submitted = st.form_submit_button("Apply exclusions", type="primary")
+                if submitted and picked:
+                    st.session_state.manual_excluded_urls = manual_excluded | set(picked)
                     st.rerun()
 
     # ---- Pre-run cost estimate (Phase 11 / A3) -------------------------------
-    _render_cost_estimate(len(all_urls))
+    _render_cost_estimate(len(all_urls), df=df, cleaned_url_set=set(all_urls))
 
     # Sticky bottom action bar
     with st._bottom:
@@ -1460,9 +1496,14 @@ def render_analyzing():
         try:
             scores = compute_pagerank(cleaned)
             st.session_state.pagerank_scores = scores
-            # PageRank v2 — weighted by Link Position. Falls back to basic
-            # internally if Link Position is missing (so this is always safe).
-            weighted_scores = compute_weighted_pagerank(cleaned)
+            # PageRank v2 — weighted by Link Position + Follow (nofollow=0)
+            # + external-link dilution. Falls back to basic internally if
+            # Link Position is missing (so this is always safe).
+            ext_counts = (
+                st.session_state.sf_data.attrs.get("external_link_counts", {})
+                if st.session_state.sf_data is not None else {}
+            )
+            weighted_scores = compute_weighted_pagerank(cleaned, external_link_counts=ext_counts)
             st.session_state.weighted_pagerank_scores = weighted_scores
             _update_time()
             step2_ph.markdown(
@@ -2045,6 +2086,57 @@ def render_results():
                 unsafe_allow_html=True,
             )
 
+            # AI score vs rule-engine score scatter — diagnostic. Tight diagonal
+            # = AI and rules agree (healthy). Outliers above the line = AI
+            # ranked the pair higher than the rules; below = rules higher
+            # than AI. Only renders when at least 5 recs have both scores
+            # (closed-task / B3 path).
+            scored_recs = [r for r in recommendations if r.get("ai_score") is not None]
+            if len(scored_recs) >= 5:
+                import plotly.graph_objects as go
+                xs = [r.get("relevance_score", 0) for r in scored_recs]
+                ys = [r.get("ai_score", 0) for r in scored_recs]
+                hover = [
+                    f"{r.get('source_url','')[-50:]}<br>→ {r.get('target_url','')[-50:]}"
+                    for r in scored_recs
+                ]
+                with st.expander(f"AI score vs rule-engine score ({len(scored_recs)} recs)"):
+                    st.markdown(
+                        "<p style='color:#94A3B8;font-size:12px;margin:0 0 8px 0;'>"
+                        "Each dot is a kept recommendation. Tight diagonal = AI and "
+                        "rules agree. Points <strong>above</strong> the line = AI scored "
+                        "higher than rules (AI may be over-confident); <strong>below</strong> = "
+                        "rules scored higher (AI may be under-rating real fits). Big "
+                        "outliers are worth a manual spot-check.</p>",
+                        unsafe_allow_html=True,
+                    )
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(
+                        x=xs, y=ys,
+                        mode="markers",
+                        marker=dict(size=8, color="#34D399", opacity=0.7,
+                                    line=dict(width=1, color="#0F172A")),
+                        hovertext=hover,
+                        hoverinfo="text+x+y",
+                        name="recs",
+                    ))
+                    # y=x reference line
+                    fig.add_trace(go.Scatter(
+                        x=[0, 100], y=[0, 100], mode="lines",
+                        line=dict(color="#94A3B8", dash="dash", width=1),
+                        showlegend=False, hoverinfo="skip",
+                    ))
+                    fig.update_layout(
+                        xaxis=dict(title="Rule-engine score (relevance_scorer)", range=[0, 105]),
+                        yaxis=dict(title="AI score (B3 closed-task)", range=[0, 105]),
+                        height=400,
+                        margin=dict(l=40, r=20, t=10, b=40),
+                        plot_bgcolor="rgba(15,23,42,0.4)",
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color="#E2E8F0"),
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
             # Priority filter
             filter_priority = st.selectbox(
                 "Filter by priority",
@@ -2184,6 +2276,102 @@ def render_results():
                 unsafe_allow_html=True,
             )
 
+    # ---- Removal candidates (closes original PRD's "to remove" status) ----
+    removal_stats = ai_results.get("removal_stats") if ai_results else None
+    removal_candidates = ai_results.get("removal_candidates", []) if ai_results else []
+    if removal_stats and removal_stats.get("total", 0) > 0:
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown(f"### Links to Remove (Review) {render_badge('REVIEW')}", unsafe_allow_html=True)
+        st.markdown(
+            "<p style='color:#94A3B8;font-size:13px;margin:0 0 12px 0;'>"
+            "Existing internal links flagged for removal review. Two sources: "
+            "<strong style='color:#F87171;'>hard-fail</strong> (links that violate the linking rules — "
+            "cross-cocoon, cross-section, past-event target) and "
+            "<strong style='color:#FBBF24;'>swap candidates</strong> (lowest-scoring live links on "
+            "over-budget sources where a higher-scoring rec is proposed on the same source). "
+            "Nothing is auto-executed — review and decide.</p>",
+            unsafe_allow_html=True,
+        )
+        rc1, rc2, rc3 = st.columns(3)
+        with rc1:
+            st.metric("Total flagged", f"{removal_stats['total']}")
+        with rc2:
+            st.metric("Hard-fail", f"{removal_stats['hard_fail']}",
+                      help="Existing links that fail the linking rules (cross-cocoon, cross-section, cross-market, past-event). Review for removal regardless of budget.")
+        with rc3:
+            st.metric("Swap candidates", f"{removal_stats['swap']}",
+                      help="Lowest-scoring live links on pages over their outbound cap, where a higher-scoring rec is proposed on the same source.")
+
+        # Show first 10 candidates inline so the team gets a feel; full list in CSV / HTML.
+        preview = removal_candidates[:10]
+        if preview:
+            preview_rows = []
+            for cand in preview:
+                kind = "Hard-fail" if cand.get("removal_type") == "hard_fail" else "Swap"
+                preview_rows.append({
+                    "Kind": kind,
+                    "Source": cand.get("source_url", ""),
+                    "Target": cand.get("target_url", ""),
+                    "Anchor": cand.get("anchor", ""),
+                    "Score": cand.get("relevance_score", 0),
+                    "Reason": cand.get("reason", ""),
+                })
+            st.dataframe(
+                pd.DataFrame(preview_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+            if len(removal_candidates) > 10:
+                st.markdown(
+                    f"<p style='color:#64748B;font-size:12px;margin-top:4px;'>"
+                    f"Showing 10 of {len(removal_candidates)}. Full list in the CSV / HTML report.</p>",
+                    unsafe_allow_html=True,
+                )
+
+    # ---- Anchor update candidates (weak anchors on existing crawl links) ----
+    update_stats = ai_results.get("update_stats") if ai_results else None
+    update_candidates_ui = ai_results.get("update_candidates", []) if ai_results else []
+    if update_stats and update_stats.get("total", 0) > 0:
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown(f"### Anchors to Update (Review) {render_badge('REVIEW')}", unsafe_allow_html=True)
+        st.markdown(
+            "<p style='color:#94A3B8;font-size:13px;margin:0 0 12px 0;'>"
+            "Existing internal links with weak anchors (generic, empty, "
+            "domain-only). Replacing them with target-keyword anchors improves "
+            "topical signal. Suggestions come from the target's priority "
+            "keyword when available, else from the URL slug. Review and apply.</p>",
+            unsafe_allow_html=True,
+        )
+        uc1, uc2 = st.columns(2)
+        with uc1:
+            st.metric("Anchors to update", f"{update_stats['total']}")
+        with uc2:
+            st.metric("Links scanned", f"{update_stats.get('scored_links', 0):,}",
+                      help="Total unique (source, target, anchor) triples scored against the weak-anchor classifier.")
+
+        preview_u = update_candidates_ui[:10]
+        if preview_u:
+            preview_rows = []
+            for cand in preview_u:
+                preview_rows.append({
+                    "Source": cand.get("source_url", ""),
+                    "Target": cand.get("target_url", ""),
+                    "Existing anchor": cand.get("existing_anchor", ""),
+                    "Suggested": cand.get("suggested_anchor", ""),
+                    "Reason": cand.get("reason", ""),
+                })
+            st.dataframe(
+                pd.DataFrame(preview_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+            if len(update_candidates_ui) > 10:
+                st.markdown(
+                    f"<p style='color:#64748B;font-size:12px;margin-top:4px;'>"
+                    f"Showing 10 of {len(update_candidates_ui)}. Full list in the CSV / HTML report.</p>",
+                    unsafe_allow_html=True,
+                )
+
     # ---- Token Usage (inline) ----
     token_usage = st.session_state.token_usage
     if token_usage and token_usage.get("api_calls", 0) > 0:
@@ -2226,6 +2414,13 @@ def render_results():
                     line += f" · {filt:,} candidate pairs"
             if sources is not None:
                 line += f" · {sources:,} source pages with AI hints"
+            if ai_results.get("closed_task_used"):
+                line += (
+                    f" · closed-task scored in "
+                    f"{ai_results.get('score_batch_count', 0)} batch(es)"
+                )
+                if ai_results.get("context_cache_used"):
+                    line += " · context cache active (B4 — ~10x cheaper input)"
             st.markdown(
                 f"<p style='color:#64748B;font-size:12px;margin-top:4px;'>{line}</p>",
                 unsafe_allow_html=True,
@@ -2250,12 +2445,22 @@ def render_results():
         st.session_state.ai_results.get("redirect_candidates", [])
         if st.session_state.ai_results else []
     )
+    removal_candidates = (
+        st.session_state.ai_results.get("removal_candidates", [])
+        if st.session_state.ai_results else []
+    )
+    update_candidates = (
+        st.session_state.ai_results.get("update_candidates", [])
+        if st.session_state.ai_results else []
+    )
     csv_content = generate_linking_plan_csv(
         cleaned_df=cleaned,
         recommendations=recommendations,
         orphan_urls=csv_orphans,
         priority_urls=csv_priorities,
         redirect_candidates=redirect_candidates,
+        removal_candidates=removal_candidates,
+        update_candidates=update_candidates,
     )
 
     # Side-by-side downloads: CSV + HTML report
@@ -2281,6 +2486,8 @@ def render_results():
         recommendations=recommendations,
         token_usage=st.session_state.get("token_usage"),
         redirect_candidates=redirect_candidates,
+        removal_candidates=removal_candidates,
+        update_candidates=update_candidates,
     )
 
     with st._bottom:

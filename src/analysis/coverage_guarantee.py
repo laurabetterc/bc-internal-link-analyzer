@@ -255,6 +255,7 @@ def ensure_full_coverage(
     cleaned_df,
     cocoons: list[dict],
     page_type_lookup: dict[str, str],
+    removal_candidates: list[dict] | None = None,
 ) -> tuple[list[dict], dict]:
     """Add fallback recs so every URL in cleaned_df has both inbound and outbound.
 
@@ -263,6 +264,11 @@ def ensure_full_coverage(
         cleaned_df: full cleaned link DataFrame (all URLs after Step 1+2 cleaning)
         cocoons: AI + deterministic cocoons (post-merge)
         page_type_lookup: {url: page_type} for type-aware fallbacks
+        removal_candidates: list of `to remove` candidates from
+            `compute_removal_candidates`. When provided, the final-state count
+            subtracts these from the crawl baseline so pages whose only links
+            are flagged for removal get a fallback. Pass None to skip
+            (legacy behaviour — crawl is treated as the floor).
 
     Returns:
         (recommendations_with_fallbacks, stats_dict)
@@ -275,6 +281,8 @@ def ensure_full_coverage(
         "outbound_fallbacks_added": 0,
         "inbound_unfillable": 0,
         "outbound_unfillable": 0,
+        "post_removal_inbound_gaps": 0,
+        "post_removal_outbound_gaps": 0,
     }
 
     if cleaned_df is None or cleaned_df.empty:
@@ -290,6 +298,29 @@ def ensure_full_coverage(
     # Existing crawl link counts
     crawl_inbound: Counter[str] = Counter(cleaned_df["Destination"].dropna().tolist())
     crawl_outbound: Counter[str] = Counter(cleaned_df["Source"].dropna().tolist())
+
+    # Removal counts — subtract from the crawl baseline so pages whose only
+    # crawl links are flagged for removal get a fallback. Deduped on
+    # (source, target) since the removal index is unique per edge.
+    removal_inbound: Counter[str] = Counter()
+    removal_outbound: Counter[str] = Counter()
+    if removal_candidates:
+        seen_edges: set[tuple[str, str]] = set()
+        for cand in removal_candidates:
+            edge = (cand.get("source_url", ""), cand.get("target_url", ""))
+            if edge in seen_edges or not edge[0] or not edge[1]:
+                continue
+            seen_edges.add(edge)
+            removal_inbound[edge[1]] += 1
+            removal_outbound[edge[0]] += 1
+        stats["post_removal_inbound_gaps"] = sum(
+            1 for u in all_urls
+            if (crawl_inbound.get(u, 0) - removal_inbound.get(u, 0)) <= 0
+        )
+        stats["post_removal_outbound_gaps"] = sum(
+            1 for u in all_urls
+            if (crawl_outbound.get(u, 0) - removal_outbound.get(u, 0)) <= 0
+        )
 
     # Recommendation link counts
     rec_inbound: Counter[str] = Counter(r.get("target_url", "") for r in recommendations)
@@ -319,15 +350,23 @@ def ensure_full_coverage(
     homepage = _detect_homepage(all_urls)
     all_urls_list = sorted(all_urls)
 
-    # Identify gaps
+    # Identify gaps. Final state = crawl + recs - removals.
     inbound_gaps: list[str] = []
     outbound_gaps: list[str] = []
     for url in all_urls:
-        final_in = crawl_inbound.get(url, 0) + rec_inbound.get(url, 0)
-        final_out = crawl_outbound.get(url, 0) + rec_outbound.get(url, 0)
-        if final_in == 0:
+        final_in = (
+            crawl_inbound.get(url, 0)
+            + rec_inbound.get(url, 0)
+            - removal_inbound.get(url, 0)
+        )
+        final_out = (
+            crawl_outbound.get(url, 0)
+            + rec_outbound.get(url, 0)
+            - removal_outbound.get(url, 0)
+        )
+        if final_in <= 0:
             inbound_gaps.append(url)
-        if final_out == 0:
+        if final_out <= 0:
             outbound_gaps.append(url)
     stats["inbound_gaps_before"] = len(inbound_gaps)
     stats["outbound_gaps_before"] = len(outbound_gaps)
