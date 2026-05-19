@@ -2312,10 +2312,9 @@ def render_results():
         st.markdown(
             "<p style='color:#94A3B8;font-size:13px;margin:0 0 12px 0;'>"
             "Existing internal links flagged for removal review. Two sources: "
-            "<strong style='color:#F87171;'>hard-fail</strong> (links that violate the linking rules — "
-            "cross-cocoon, cross-section, past-event target) and "
-            "<strong style='color:#FBBF24;'>swap candidates</strong> (lowest-scoring live links on "
-            "over-budget sources where a higher-scoring rec is proposed on the same source). "
+            "<strong style='color:#F87171;'>broken targets</strong> (the destination returns 4xx / 5xx — link is dead) and "
+            "<strong style='color:#FBBF24;'>hard-fail</strong> (links that violate the linking rules — "
+            "cross-section, cross-market, self-link). "
             "Nothing is auto-executed — review and decide.</p>",
             unsafe_allow_html=True,
         )
@@ -2323,18 +2322,23 @@ def render_results():
         with rc1:
             st.metric("Total flagged", f"{removal_stats['total']}")
         with rc2:
-            st.metric("Hard-fail", f"{removal_stats['hard_fail']}",
-                      help="Existing links that fail the linking rules (cross-cocoon, cross-section, cross-market, past-event). Review for removal regardless of budget.")
+            st.metric("Broken targets", f"{removal_stats.get('broken_target', 0)}",
+                      help="Internal links pointing to 4xx / 5xx pages. The link is dead — remove or repoint.")
         with rc3:
-            st.metric("Swap candidates", f"{removal_stats['swap']}",
-                      help="Lowest-scoring live links on pages over their outbound cap, where a higher-scoring rec is proposed on the same source.")
+            st.metric("Hard-fail", f"{removal_stats['hard_fail']}",
+                      help="Existing links that fail the linking rules (cross-section, cross-market, self-link). Review for removal regardless of budget.")
 
         # Show first 10 candidates inline so the team gets a feel; full list in CSV / HTML.
+        _kind_label = {
+            "broken_target": "Broken target",
+            "hard_fail": "Hard-fail",
+            "swap": "Swap",
+        }
         preview = removal_candidates[:10]
         if preview:
             preview_rows = []
             for cand in preview:
-                kind = "Hard-fail" if cand.get("removal_type") == "hard_fail" else "Swap"
+                kind = _kind_label.get(cand.get("removal_type", ""), "Other")
                 preview_rows.append({
                     "Kind": kind,
                     "Source": cand.get("source_url", ""),

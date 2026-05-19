@@ -254,20 +254,25 @@ def generate_html_report(
         {_table_html(["", "Source URL", "Target URL", "Anchor", "Target", "Section", "Score", "Reason"], rec_rows, max_height="600px")}
         """
 
-    # --- Removal candidates (hard-fail + swap) ---
+    # --- Removal candidates (broken targets + hard-fails) ---
     removal_section = ""
     if removal_candidates:
+        broken = [c for c in removal_candidates if c.get("removal_type") == "broken_target"]
         hard_fails = [c for c in removal_candidates if c.get("removal_type") == "hard_fail"]
-        swaps = [c for c in removal_candidates if c.get("removal_type") == "swap"]
+        kind_label = {
+            "broken_target": "Broken target",
+            "hard_fail": "Hard-fail",
+            "swap": "Swap",  # legacy
+        }
         removal_rows = []
         for cand in removal_candidates:
-            kind = "Hard-fail" if cand.get("removal_type") == "hard_fail" else "Swap"
+            kind = kind_label.get(cand.get("removal_type", ""), "Other")
             removal_rows.append([
                 kind,
                 cand.get("source_url", ""),
                 cand.get("target_url", ""),
                 cand.get("anchor", ""),
-                str(cand.get("relevance_score", 0)),
+                str(cand.get("relevance_score", 0)) if cand.get("removal_type") != "broken_target" else "—",
                 cand.get("reason", ""),
             ])
         removal_section = f"""
@@ -275,12 +280,11 @@ def generate_html_report(
         <p style="color:#94A3B8;font-size:14px;margin-bottom:16px;">
             <strong style="color:#F0F4F8;">{len(removal_candidates)}</strong>
             existing internal links flagged for removal review:
-            <strong style="color:#F87171;">{len(hard_fails)}</strong> hard-fail
-            (cross-cocoon / cross-section / past-event) and
-            <strong style="color:#FBBF24;">{len(swaps)}</strong> swap candidates
-            (lowest-scoring live links on over-budget sources where a higher-
-            scoring rec is proposed). Nothing is auto-executed — the SEO
-            Content Manager reviews and decides.</p>
+            <strong style="color:#F87171;">{len(broken)}</strong> broken targets
+            (4xx / 5xx — link is dead) and
+            <strong style="color:#FBBF24;">{len(hard_fails)}</strong> hard-fail
+            (cross-section / cross-market / self-link). Nothing is
+            auto-executed — the SEO Content Manager reviews and decides.</p>
         {_table_html(["Kind", "Source URL", "Target URL", "Anchor", "Score", "Reason"], removal_rows, max_height="500px")}
         """
 

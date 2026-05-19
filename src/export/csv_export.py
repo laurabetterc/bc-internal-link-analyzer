@@ -82,6 +82,20 @@ def generate_linking_plan_csv(
         if key[0] and key[1]:
             update_index[key] = cand
 
+    # Track which (source, target) pairs we've written so the broken-target
+    # pass below doesn't double-emit a pair that was already flipped via
+    # cleaned_df. (Broken edges are filtered out of cleaned_df by the parser,
+    # but defense in depth — a future parser change shouldn't silently break
+    # CSV correctness here.)
+    written_pairs: set[tuple[str, str]] = set()
+
+    def _removal_tag(removal_type: str) -> str:
+        if removal_type == "hard_fail":
+            return "[Hard-fail]"
+        if removal_type == "broken_target":
+            return "[Broken target]"
+        return "[Swap candidate]"  # legacy — kept for backward-compat
+
     # All existing links from cleaned data. Status defaults to "live"; flips
     # to "to remove" (highest priority) when in the removal index, or "to
     # update" when in the update index. Removal supersedes update.
@@ -90,8 +104,6 @@ def generate_linking_plan_csv(
         source = link_row["Source"]
         cand = removal_index.get((source, target))
         if cand:
-            removal_type = cand.get("removal_type", "")
-            tag = "[Hard-fail]" if removal_type == "hard_fail" else "[Swap candidate]"
             rows.append({
                 "Source URL": source,
                 "Target URL": target,
@@ -101,8 +113,9 @@ def generate_linking_plan_csv(
                 "Section": _section_label(source),
                 "Score": int(cand.get("relevance_score", 0)),
                 "Priority": "review",
-                "Reason": f"{tag} {cand.get('reason', '')}".strip(),
+                "Reason": f"{_removal_tag(cand.get('removal_type', ''))} {cand.get('reason', '')}".strip(),
             })
+            written_pairs.add((source, target))
             continue
         upd = update_index.get((source, target))
         if upd:
@@ -131,6 +144,31 @@ def generate_linking_plan_csv(
             "Priority": "",
             "Reason": "",
         })
+        written_pairs.add((source, target))
+
+    # Broken-target removals (4xx/5xx). These pairs are filtered out of
+    # `cleaned_df` by the parser (so the AI never recommends links TO broken
+    # URLs), which means the loop above never sees them. Emit them directly
+    # so the team gets actionable `to remove` rows for dead targets.
+    for cand in (removal_candidates or []):
+        if cand.get("removal_type") != "broken_target":
+            continue
+        source = cand.get("source_url", "")
+        target = cand.get("target_url", "")
+        if not source or not target or (source, target) in written_pairs:
+            continue
+        rows.append({
+            "Source URL": source,
+            "Target URL": target,
+            "Anchor": cand.get("anchor", ""),
+            "Status": "to remove",
+            "Target Status": "Broken",
+            "Section": _section_label(source),
+            "Score": "",
+            "Priority": "review",
+            "Reason": f"{_removal_tag('broken_target')} {cand.get('reason', '')}".strip(),
+        })
+        written_pairs.add((source, target))
 
     # AI recommendations (status: "to add"). Coverage fallbacks share the
     # same Status value — the [Coverage fallback] tag in the Reason column
