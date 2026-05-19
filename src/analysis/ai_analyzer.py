@@ -42,6 +42,16 @@ def _redact(text: str) -> str:
     return _API_KEY_PATTERN.sub("[REDACTED_API_KEY]", str(text))
 
 
+def _extract_list(result, key: str) -> list:
+    """Pull a list of items from a JSON response that may be {key: [...]} or [...]."""
+    if isinstance(result, list):
+        return result
+    if isinstance(result, dict):
+        items = result.get(key, [])
+        return items if isinstance(items, list) else []
+    return []
+
+
 # Token usage tracker — accumulates across all API calls in one analysis
 _token_usage = {
     "prompt_tokens": 0,
@@ -556,8 +566,8 @@ Respond with a JSON object with this exact structure:
                 # a more expensive model for recommendations.
                 text = _call_gemini(client, prompt, model=_cocoon_model())
                 result = json.loads(text)
-                batch_cocoons = result.get("cocoons", [])
-                all_cocoons.extend(batch_cocoons)
+                batch_cocoons = _extract_list(result, "cocoons")
+                all_cocoons.extend(c for c in batch_cocoons if isinstance(c, dict))
                 break
             except Exception as e:
                 if attempt == 0:
@@ -943,8 +953,10 @@ Find as many relevant opportunities as you can (aim for 5-15 per batch). ORPHANS
             try:
                 text = _call_gemini(client, prompt)
                 result = json.loads(text)
-                recs = result.get("recommendations", [])
+                recs = _extract_list(result, "recommendations")
                 for rec in recs:
+                    if not isinstance(rec, dict):
+                        continue
                     # Normalize URLs (strip trailing slashes)
                     src = _normalize_url(rec.get("source_url", ""))
                     tgt = _normalize_url(rec.get("target_url", ""))
@@ -1273,9 +1285,11 @@ def score_link_pairs(
             try:
                 text = _call_gemini(client, prompt, cached_content=cache_name)
                 result = json.loads(text)
-                scores = result.get("scores", [])
+                scores = _extract_list(result, "scores")
 
                 for s in scores:
+                    if not isinstance(s, dict):
+                        continue
                     idx = s.get("index")
                     if not isinstance(idx, int) or idx < 0 or idx >= len(pair_meta):
                         continue
