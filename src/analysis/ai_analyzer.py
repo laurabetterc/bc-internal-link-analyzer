@@ -7,6 +7,7 @@ Tracks token usage for cost transparency.
 
 import json
 import time
+import traceback
 from urllib.parse import urlparse
 
 import pandas as pd
@@ -1363,7 +1364,20 @@ def score_link_pairs(
                 if attempt == 0:
                     time.sleep(3)
                     continue
-                batch_errors.append(f"Scoring batch {batch_idx+1}: {_redact(str(e))}")
+                # Capture the deepest frame inside our own code so we can
+                # see WHERE the exception originated — generic exception
+                # types like AttributeError tell us nothing without it.
+                tb = traceback.extract_tb(e.__traceback__)
+                our_frames = [f for f in tb if "/src/" in f.filename]
+                location = ""
+                if our_frames:
+                    last = our_frames[-1]
+                    fname = last.filename.split("/src/", 1)[-1]
+                    location = f" [{fname}:{last.lineno}]"
+                batch_errors.append(
+                    f"Scoring batch {batch_idx+1}: "
+                    f"{type(e).__name__}: {_redact(str(e))}{location}"
+                )
                 break
 
     # Best-effort cache cleanup. Orphan caches expire on Gemini's side after
