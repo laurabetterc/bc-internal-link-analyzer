@@ -794,6 +794,10 @@ def _step2_clear_section_caches():
         "pagination_info", "template_links_info", "template_exclude",
         "url_patterns", "pattern_exclude", "news_patterns_info", "news_exclude",
         "manual_excluded_urls",
+        # Market state — re-derive from the new section. If the user explicitly
+        # picked "multi-market" on section A and then switches to section B, we
+        # re-prompt; the friction is small and the correctness is worth it.
+        "market_resolved", "market_detection",
     ):
         st.session_state.pop(k, None)
     for k in [
@@ -1365,6 +1369,11 @@ def render_cleaning_step2():
     # ---- Pre-run cost estimate (Phase 11 / A3) -------------------------------
     _render_cost_estimate(len(all_urls), df=df, cleaned_url_set=set(all_urls))
 
+    # ---- Market gate (linking-rules.md section 5) ----------------------------
+    # Rendered inline on Step 2 so the picker persists across reruns. Disables
+    # the Run Analysis button when the market isn't resolved yet.
+    market_ready = _render_market_gate(df)
+
     # Sticky bottom action bar
     with st._bottom:
         bar_cols = st.columns([1, 3])
@@ -1373,7 +1382,13 @@ def render_cleaning_step2():
                 st.session_state.wizard_step = "step1"
                 st.rerun()
         with bar_cols[1]:
-            if st.button("Run Analysis →", key="step2_next", use_container_width=True):
+            if st.button(
+                "Run Analysis →",
+                key="step2_next",
+                use_container_width=True,
+                disabled=not market_ready,
+                help=None if market_ready else "Pick a market above to enable",
+            ):
                 cleaned = _apply_step2_filters(df, exclude_patterns)
                 st.session_state.cleaned_data = cleaned
                 st.session_state.exclude_patterns = exclude_patterns
@@ -1381,45 +1396,97 @@ def render_cleaning_step2():
 
 
 def _start_analysis():
-    """Transition to the analyzing screen. Blocks if AI is not available or market is ambiguous."""
+    """Transition to the analyzing screen.
+
+    Pre-conditions enforced inline on Step 2:
+    - AI must be connected (the Next button is disabled otherwise)
+    - Market must be resolved (the inline market gate handles this)
+
+    This function is now a thin transition — all gating UI lives on Step 2
+    so user interactions persist across reruns. The defensive checks here
+    only fire if a user somehow bypasses the UI gate.
+    """
     ai_health = st.session_state.get("ai_health")
     if not ai_health or not ai_health.get("ok"):
-        error_detail = ai_health.get("error", "Unknown error") if ai_health else "Not checked"
-        st.error(
-            f"**Cannot run analysis — AI is not connected.**\n\n"
-            f"Error: {error_detail}\n\n"
-            f"Go back to the top of this page, expand the **AI configuration** panel, "
-            f"paste a valid Gemini API key, and click **Connect**."
-        )
+        st.error("AI is not connected — go back to the AI configuration panel and connect.")
         return
-
-    # Market gate (linking-rules.md section 5) — block when market is ambiguous
     if not st.session_state.get("market_resolved"):
-        from src.analysis.market_detector import detect_market
-        cleaned = st.session_state.cleaned_data
-        all_urls = pd.unique(pd.concat([cleaned["Source"], cleaned["Destination"]])).tolist()
-        detection = detect_market(all_urls)
-        st.session_state.market_detection = detection
-        if detection["status"] == "resolved":
-            st.session_state.market_resolved = detection["market"]
-        else:
-            # Stop here — user needs to pick a market
-            st.warning(
-                f"**Market detection is ambiguous** — {detection.get('evidence', '')}\n\n"
-                f"Please specify the target market below and click **Confirm market**, "
-                f"then click **Run Analysis** again."
-            )
-            from src.analysis.market_detector import COUNTRY_CODES
-            options = ["— Pick a market —"] + sorted(COUNTRY_CODES) + ["multi-market (AI infers per page)"]
-            choice = st.selectbox("Market", options, key="market_picker")
-            if st.button("Confirm market", key="market_confirm"):
-                if choice and not choice.startswith("—"):
-                    st.session_state.market_resolved = choice
-                    st.rerun()
-            return
+        st.error("Market not set — pick a market in the gate above before running.")
+        return
 
     st.session_state.wizard_step = "analyzing"
     st.rerun()
+
+
+def _render_market_gate(df: pd.DataFrame) -> bool:
+    """Detect market for the current cleaned df and render the picker if needed.
+
+    Returns True if a market is resolved (so the caller can enable Run Analysis),
+    False if the user still needs to pick. Persistent across reruns because it's
+    rendered on Step 2, not gated behind a button click.
+    """
+    from src.analysis.market_detector import detect_market, COUNTRY_CODES
+
+    # Auto-derive from the selected language section when it carries a country
+    # code (e.g. /mx/ section → market "mx"). This skips the dialog entirely on
+    # bolavip-style multilingual sites where the section already implies the
+    # market.
+    sel_lang = st.session_state.get("selected_language") or ""
+    sel_lang_lower = sel_lang.lower()
+    if not st.session_state.get("market_resolved"):
+        # selected_language may be "mx" (country), "pt-br" (BCP47), or just "pt".
+        # Match against COUNTRY_CODES directly; for BCP47, take the country half.
+        candidate = None
+        if sel_lang_lower in COUNTRY_CODES:
+            candidate = sel_lang_lower
+        elif "-" in sel_lang_lower:
+            tail = sel_lang_lower.split("-", 1)[1]
+            if tail in COUNTRY_CODES:
+                candidate = tail
+        if candidate:
+            st.session_state.market_resolved = candidate
+            st.session_state.market_detection = {
+                "status": "resolved",
+                "market": candidate,
+                "evidence": f"derived from section /{sel_lang_lower}/",
+                "needs_user_input": False,
+            }
+
+    if not st.session_state.get("market_resolved"):
+        # Fall back to URL-based detection (host TLD or path subfolder)
+        all_urls = pd.unique(pd.concat([df["Source"], df["Destination"]])).tolist()
+        detection = st.session_state.get("market_detection")
+        if not detection:
+            detection = detect_market(all_urls)
+            st.session_state.market_detection = detection
+        if detection["status"] == "resolved":
+            st.session_state.market_resolved = detection["market"]
+
+    if st.session_state.get("market_resolved"):
+        return True
+
+    # Ambiguous or multi-market → render persistent inline gate
+    detection = st.session_state.get("market_detection") or {}
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("#### Target market", unsafe_allow_html=True)
+    st.markdown(
+        f"<p style='color:#94A3B8;font-size:14px;margin-bottom:12px;'>"
+        f"We couldn't auto-detect a single market from the URLs "
+        f"({detection.get('evidence', 'no clear signal')}). "
+        f"Pick the market this site targets so cross-market links can be "
+        f"flagged correctly. Choose <strong>multi-market</strong> if the "
+        f"site genuinely spans several countries.</p>",
+        unsafe_allow_html=True,
+    )
+    options = ["— Pick a market —"] + sorted(COUNTRY_CODES) + ["multi-market (AI infers per page)"]
+    choice = st.selectbox("Market", options, key="market_picker", label_visibility="collapsed")
+    if choice and not choice.startswith("—"):
+        # Selecting an option in the dropdown is itself the confirmation —
+        # Streamlit reruns, the selection persists in session_state, and the
+        # gate disappears on the next render.
+        st.session_state.market_resolved = choice
+        st.rerun()
+    return False
 
 
 # ============================================================
