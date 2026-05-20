@@ -21,6 +21,7 @@ def generate_linking_plan_csv(
     redirect_candidates: list[dict] | None = None,
     removal_candidates: list[dict] | None = None,
     update_candidates: list[dict] | None = None,
+    editorial_orphans: list[dict] | None = None,
 ) -> str:
     """Generate the linking plan as a CSV string.
 
@@ -170,6 +171,28 @@ def generate_linking_plan_csv(
         })
         written_pairs.add((source, target))
 
+    # Editorially-orphaned pages (status: "needs inbound link"). These pages
+    # lost ALL inbound to Step 2 exclusions (pagination/template/news) — no
+    # source row exists because the team must decide where the new editorial
+    # link comes from. Target = the orphaned page; Source blank.
+    for orph in (editorial_orphans or []):
+        page = orph.get("url", "")
+        if not page:
+            continue
+        lost = orph.get("lost_sources", [])
+        lost_note = (" Was linked from: " + ", ".join(lost[:5])) if lost else ""
+        rows.append({
+            "Source URL": "",
+            "Target URL": page,
+            "Anchor": "",
+            "Status": "needs inbound link",
+            "Target Status": "Editorially orphaned",
+            "Section": _section_label(page),
+            "Score": "",
+            "Priority": "review",
+            "Reason": f"[Editorially orphaned] {orph.get('reason', '')}{lost_note}".strip(),
+        })
+
     # AI recommendations (status: "to add"). Coverage fallbacks share the
     # same Status value — the [Coverage fallback] tag in the Reason column
     # is the filter signal, the Status column stays simple for the team.
@@ -215,9 +238,12 @@ def generate_linking_plan_csv(
     )
 
     # Sort: 301 candidates first (highest urgency), then "to remove" (action
-    # needed), then "to update" (anchor change), then "to add" (new recs),
-    # then "live" (informational).
-    status_order = {"301 candidate": 0, "to remove": 1, "to update": 2, "to add": 3, "live": 4}
+    # needed), then "to update" (anchor change), then "needs inbound link"
+    # (editorially orphaned), then "to add" (new recs), then "live" (info).
+    status_order = {
+        "301 candidate": 0, "to remove": 1, "to update": 2,
+        "needs inbound link": 3, "to add": 4, "live": 5,
+    }
     df["_sort"] = df["Status"].map(status_order).fillna(99)
     df = df.sort_values(["_sort", "Target URL", "Source URL"]).drop(columns=["_sort"])
 

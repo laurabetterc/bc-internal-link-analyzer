@@ -65,6 +65,7 @@ def generate_html_report(
     redirect_candidates: list[dict] | None = None,
     removal_candidates: list[dict] | None = None,
     update_candidates: list[dict] | None = None,
+    editorial_orphans: list[dict] | None = None,
 ) -> str:
     """Generate a self-contained HTML report with all analysis results.
 
@@ -311,6 +312,33 @@ def generate_html_report(
         {_table_html(["Source URL", "Target URL", "Existing anchor", "Suggested anchor", "Reason"], update_rows, max_height="500px")}
         """
 
+    # --- Editorially orphaned (needs inbound links) ---
+    editorial_section = ""
+    if editorial_orphans:
+        pag_only = sum(1 for o in editorial_orphans if o.get("pagination_only"))
+        eo_rows = []
+        for o in editorial_orphans:
+            eo_rows.append([
+                o.get("url", ""),
+                str(o.get("lost_inbound", 0)),
+                "yes" if o.get("pagination_only") else "no",
+                ", ".join(o.get("lost_sources", [])[:4]),
+            ])
+        editorial_section = f"""
+        <h2 style="margin-top:48px;">Editorially orphaned — needs inbound links</h2>
+        <p style="color:#94A3B8;font-size:14px;margin-bottom:16px;">
+            <strong style="color:#F0F4F8;">{len(editorial_orphans)}</strong>
+            real content pages (200 OK) whose <strong>entire</strong> inbound link
+            set came from excluded sources — pagination/archive pages, the site-wide
+            template (nav/footer), or news/timely pages
+            (<strong style="color:#FBBF24;">{pag_only}</strong> linked
+            <em>only</em> via pagination). After exclusion, no editorial content
+            page links to them, so they receive almost no internal authority and are
+            hard to discover. The fix is editorial: add contextual links from
+            relevant pages (matching operator cocoon or topic guides).</p>
+        {_table_html(["Orphaned page", "Lost inbound", "Only via pagination", "Was linked from"], eo_rows, max_height="500px")}
+        """
+
     # --- C3 — Recurring-event redirect candidates ---
     redirect_section = ""
     if redirect_candidates:
@@ -497,6 +525,9 @@ def generate_html_report(
 
         <!-- Anchors to update (review) -->
         {update_section}
+
+        <!-- Editorially orphaned — needs inbound links -->
+        {editorial_section}
 
         <!-- Past-edition redirect candidates (C3) -->
         {redirect_section}

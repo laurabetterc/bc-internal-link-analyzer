@@ -627,6 +627,30 @@ def _apply_step2_filters(df: pd.DataFrame, exclude_patterns: list[str]) -> pd.Da
         mask = cleaned["Source"].isin(manual_set) | cleaned["Destination"].isin(manual_set)
         cleaned = cleaned[~mask].copy()
 
+    # Editorial-orphan detection: pages that had inbound in `df` but lost ALL
+    # of it to the exclusions above. Surfaced as "needs inbound link" so the
+    # team can add real editorial links. Stashed on .attrs (same mechanism as
+    # broken_links) so it flows downstream to the dashboard + exports.
+    from src.analysis.editorial_orphans import detect_editorial_orphans
+    pag_urls_set = set(pagination["urls"]) if (
+        st.session_state.get("remove_pagination", False) and pagination.get("count", 0) > 0
+    ) else set()
+    broken_targets = {
+        b.get("target_url") for b in (df.attrs.get("broken_links") or []) if b.get("target_url")
+    }
+    cleaned.attrs["editorial_orphans"] = detect_editorial_orphans(
+        pre_df=df,
+        cleaned_df=cleaned,
+        pagination_urls=pag_urls_set,
+        news_urls=news_excl_urls,
+        manual_urls=manual_set,
+        broken_targets=broken_targets,
+    )
+    # Preserve the parser's attrs (boolean indexing can drop them on some
+    # pandas versions); broken_links/external counts are read at analysis time.
+    cleaned.attrs.setdefault("broken_links", df.attrs.get("broken_links", []))
+    cleaned.attrs.setdefault("external_link_counts", df.attrs.get("external_link_counts", {}))
+
     return cleaned
 
 
@@ -2497,6 +2521,48 @@ def render_results():
                     unsafe_allow_html=True,
                 )
 
+    # ---- Editorially Orphaned (needs inbound links) ----
+    editorial_orphans = cleaned.attrs.get("editorial_orphans", []) if cleaned is not None else []
+    if editorial_orphans:
+        pag_only = [o for o in editorial_orphans if o.get("pagination_only")]
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown(f"### Editorially Orphaned — Needs Inbound Links {render_badge('ACTION')}", unsafe_allow_html=True)
+        st.markdown(
+            "<p style='color:#94A3B8;font-size:13px;margin:0 0 12px 0;'>"
+            "Real content pages (200 OK) whose <strong>entire</strong> inbound link set "
+            "came from sources that were excluded — pagination/archive pages, the site-wide "
+            "template (nav/footer), or news/timely pages. After exclusion, "
+            "<strong>no editorial content page links to them</strong>. They pass almost no "
+            "internal authority and are hard to discover. The fix is editorial: add contextual "
+            "links from relevant pages (e.g. the matching operator cocoon or topic guides).</p>",
+            unsafe_allow_html=True,
+        )
+        eo1, eo2 = st.columns(2)
+        with eo1:
+            st.metric("Editorially orphaned", f"{len(editorial_orphans):,}")
+        with eo2:
+            st.metric("Linked only via pagination", f"{len(pag_only):,}",
+                      help="Pages whose only inbound links were pagination/archive pages — the clearest orphan signal.")
+
+        preview_o = editorial_orphans[:10]
+        preview_rows = []
+        for o in preview_o:
+            srcs = o.get("lost_sources", [])
+            preview_rows.append({
+                "Orphaned page": o.get("url", ""),
+                "Lost inbound": o.get("lost_inbound", 0),
+                "Only via pagination": "yes" if o.get("pagination_only") else "no",
+                "Was linked from": ", ".join(s.split(".com", 1)[-1] or s for s in srcs[:3]),
+            })
+        st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
+        if len(editorial_orphans) > 10:
+            st.markdown(
+                f"<p style='color:#64748B;font-size:12px;margin-top:4px;'>"
+                f"Showing 10 of {len(editorial_orphans):,}. Full list in the CSV "
+                f"(filter Status = <code>needs inbound link</code>) / HTML report.</p>",
+                unsafe_allow_html=True,
+            )
+
     # ---- Token Usage (inline) ----
     token_usage = st.session_state.token_usage
     if token_usage and token_usage.get("api_calls", 0) > 0:
@@ -2578,6 +2644,7 @@ def render_results():
         st.session_state.ai_results.get("update_candidates", [])
         if st.session_state.ai_results else []
     )
+    editorial_orphans = cleaned.attrs.get("editorial_orphans", []) if cleaned is not None else []
     csv_content = generate_linking_plan_csv(
         cleaned_df=cleaned,
         recommendations=recommendations,
@@ -2586,6 +2653,7 @@ def render_results():
         redirect_candidates=redirect_candidates,
         removal_candidates=removal_candidates,
         update_candidates=update_candidates,
+        editorial_orphans=editorial_orphans,
     )
 
     # Side-by-side downloads: CSV + HTML report
@@ -2613,6 +2681,7 @@ def render_results():
         redirect_candidates=redirect_candidates,
         removal_candidates=removal_candidates,
         update_candidates=update_candidates,
+        editorial_orphans=editorial_orphans,
     )
 
     with st._bottom:
