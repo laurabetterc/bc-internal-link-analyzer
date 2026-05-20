@@ -1462,7 +1462,34 @@ def _render_market_gate(df: pd.DataFrame) -> bool:
         if detection["status"] == "resolved":
             st.session_state.market_resolved = detection["market"]
 
-    if st.session_state.get("market_resolved"):
+    resolved = st.session_state.get("market_resolved")
+    if resolved:
+        # Confirmation chip — without this the picker just vanishes on the
+        # rerun after selection, which reads as "the section disappeared".
+        # Showing the resolved market + a Change button gives clear feedback.
+        detection = st.session_state.get("market_detection") or {}
+        evidence = detection.get("evidence", "")
+        # "auto" = market came from detection/derivation, not a manual pick.
+        # Manual picks leave the old ambiguous detection in place (needs_user_input True).
+        auto = detection.get("needs_user_input") is False and bool(evidence)
+        label = "multi-market" if str(resolved).startswith("multi") else str(resolved).upper()
+        source_note = f" · auto-detected ({evidence})" if auto else ""
+        st.markdown("<br>", unsafe_allow_html=True)
+        c1, c2 = st.columns([4, 1])
+        with c1:
+            st.markdown(
+                f"<div style='padding:10px 14px;border-radius:8px;"
+                f"background:rgba(52,211,153,0.08);border:1px solid rgba(52,211,153,0.25);'>"
+                f"<span style='color:#34D399;font-weight:600;'>Target market: {label}</span>"
+                f"<span style='color:#64748B;font-size:13px;'>{source_note}</span></div>",
+                unsafe_allow_html=True,
+            )
+        with c2:
+            if st.button("Change", key="market_change", type="tertiary", use_container_width=True):
+                st.session_state.pop("market_resolved", None)
+                st.session_state.pop("market_detection", None)
+                st.session_state.pop("market_picker", None)
+                st.rerun()
         return True
 
     # Ambiguous or multi-market → render persistent inline gate
@@ -1483,7 +1510,7 @@ def _render_market_gate(df: pd.DataFrame) -> bool:
     if choice and not choice.startswith("—"):
         # Selecting an option in the dropdown is itself the confirmation —
         # Streamlit reruns, the selection persists in session_state, and the
-        # gate disappears on the next render.
+        # gate is replaced by the confirmation chip on the next render.
         st.session_state.market_resolved = choice
         st.rerun()
     return False
